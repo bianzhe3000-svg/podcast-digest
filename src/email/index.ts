@@ -18,7 +18,7 @@ interface DigestEpisode {
 }
 
 function createTransporter(): nodemailer.Transporter {
-  return nodemailer.createTransport({
+  const opts: any = {
     host: config.email.smtpHost,
     port: config.email.smtpPort,
     secure: config.email.smtpSecure,
@@ -26,7 +26,10 @@ function createTransporter(): nodemailer.Transporter {
       user: config.email.smtpUser,
       pass: config.email.smtpPass,
     },
-  });
+    // Force IPv4 to avoid IPv6 connectivity issues on cloud platforms (Railway, etc.)
+    family: 4,
+  };
+  return nodemailer.createTransport(opts);
 }
 
 /**
