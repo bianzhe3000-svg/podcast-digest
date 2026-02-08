@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import dns from 'dns';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import timezone from 'dayjs/plugin/timezone';
@@ -10,6 +11,9 @@ import { readMarkdown } from '../markdown';
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
+// Force Node.js to prefer IPv4 globally (fixes cloud platform IPv6 issues)
+dns.setDefaultResultOrder('ipv4first');
+
 interface DigestEpisode {
   podcast: Podcast;
   episode: Episode;
@@ -18,17 +22,23 @@ interface DigestEpisode {
 }
 
 function createTransporter(): nodemailer.Transporter {
+  // Use port 587 + STARTTLS when secure=false, port 465 + SSL when secure=true
+  const useSecure = config.email.smtpPort === 465 ? true : config.email.smtpSecure;
   const opts: any = {
     host: config.email.smtpHost,
     port: config.email.smtpPort,
-    secure: config.email.smtpSecure,
+    secure: useSecure,
     auth: {
       user: config.email.smtpUser,
       pass: config.email.smtpPass,
     },
-    // Force IPv4 to avoid IPv6 connectivity issues on cloud platforms (Railway, etc.)
     family: 4,
+    // Connection timeout 30s
+    connectionTimeout: 30000,
+    greetingTimeout: 30000,
+    socketTimeout: 30000,
   };
+  logger.info('Creating SMTP transporter', { host: opts.host, port: opts.port, secure: opts.secure, family: opts.family });
   return nodemailer.createTransport(opts);
 }
 
