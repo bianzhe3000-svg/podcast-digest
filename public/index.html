@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Podcast Digest - 播客内容处理系统</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      <div class="sidebar-header">
+        <h1>🎙️ Podcast Digest</h1>
+        <p class="subtitle">播客内容处理系统</p>
+      </div>
+      <ul class="nav-menu">
+        <li class="nav-item active" data-page="dashboard">
+          <span class="nav-icon">📊</span> 控制台
+        </li>
+        <li class="nav-item" data-page="podcasts">
+          <span class="nav-icon">🎧</span> 播客管理
+        </li>
+        <li class="nav-item" data-page="documents">
+          <span class="nav-icon">📄</span> 文档浏览
+        </li>
+        <li class="nav-item" data-page="scheduler">
+          <span class="nav-icon">⏰</span> 定时任务
+        </li>
+        <li class="nav-item" data-page="logs">
+          <span class="nav-icon">📋</span> 运行日志
+        </li>
+        <li class="nav-item" data-page="settings">
+          <span class="nav-icon">⚙️</span> 系统设置
+        </li>
+      </ul>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="content">
+      <!-- Dashboard -->
+      <div class="page active" id="page-dashboard">
+        <h2>控制台</h2>
+        <div class="stats-grid" id="stats-grid">
+          <div class="stat-card">
+            <div class="stat-value" id="stat-podcasts">-</div>
+            <div class="stat-label">订阅播客</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="stat-episodes">-</div>
+            <div class="stat-label">总剧集数</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="stat-processed">-</div>
+            <div class="stat-label">已处理</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="stat-pending">-</div>
+            <div class="stat-label">待处理</div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>系统信息</h3>
+          <div id="system-info">加载中...</div>
+        </div>
+        <div class="card">
+          <h3>快速操作</h3>
+          <div class="actions">
+            <button class="btn btn-primary" onclick="App.runPipeline()">▶️ 立即运行全量处理</button>
+            <button class="btn btn-secondary" onclick="App.navigateTo('podcasts')">➕ 添加新播客</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Podcasts -->
+      <div class="page" id="page-podcasts">
+        <div class="page-header">
+          <h2>播客管理</h2>
+          <div class="actions">
+            <button class="btn btn-primary" onclick="App.showAddPodcastModal()">➕ 添加播客</button>
+            <button class="btn btn-secondary" onclick="App.showImportOPMLModal()">📥 导入OPML</button>
+          </div>
+        </div>
+        <div id="podcasts-list" class="podcasts-grid">加载中...</div>
+      </div>
+
+      <!-- Documents -->
+      <div class="page" id="page-documents">
+        <h2>文档浏览</h2>
+        <div class="documents-layout">
+          <div class="doc-sidebar" id="doc-sidebar">加载中...</div>
+          <div class="doc-viewer" id="doc-viewer">
+            <div class="empty-state">选择左侧文档进行预览</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scheduler -->
+      <div class="page" id="page-scheduler">
+        <h2>定时任务</h2>
+        <div class="card">
+          <h3>调度器状态</h3>
+          <div id="scheduler-status">加载中...</div>
+          <div class="actions" style="margin-top:16px;">
+            <button class="btn btn-primary" id="btn-scheduler-toggle" onclick="App.toggleScheduler()">启动调度器</button>
+            <button class="btn btn-secondary" onclick="App.triggerManualRun()">🔄 手动触发</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Logs -->
+      <div class="page" id="page-logs">
+        <h2>运行日志</h2>
+        <div id="logs-list">加载中...</div>
+      </div>
+
+      <!-- Settings -->
+      <div class="page" id="page-settings">
+        <h2>系统设置</h2>
+        <div class="card" id="settings-content">加载中...</div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Add Podcast Modal -->
+  <div class="modal" id="modal-add-podcast">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>添加播客</h3>
+        <button class="modal-close" onclick="App.closeModal('modal-add-podcast')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>搜索播客</label>
+          <div class="input-group">
+            <input type="text" id="podcast-search-input" placeholder="输入播客名称搜索...">
+            <button class="btn btn-primary" onclick="App.searchPodcasts()">搜索</button>
+          </div>
+          <div id="search-results" class="search-results"></div>
+        </div>
+        <div class="divider">或直接输入 RSS Feed 地址</div>
+        <div class="form-group">
+          <label>RSS Feed URL</label>
+          <input type="text" id="rss-url-input" placeholder="https://example.com/feed.xml">
+        </div>
+        <button class="btn btn-primary" onclick="App.addPodcastByUrl()" style="width:100%">添加</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Import OPML Modal -->
+  <div class="modal" id="modal-import-opml">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>导入 OPML</h3>
+        <button class="modal-close" onclick="App.closeModal('modal-import-opml')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>粘贴 OPML 内容</label>
+          <textarea id="opml-content" rows="10" placeholder="粘贴 OPML XML 内容..."></textarea>
+        </div>
+        <button class="btn btn-primary" onclick="App.importOPML()" style="width:100%">解析并导入</button>
+        <div id="opml-results" style="margin-top:12px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast-container"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>

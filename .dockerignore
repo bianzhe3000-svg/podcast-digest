@@ -1,0 +1,12 @@
+node_modules/
+dist/
+data/
+tmp/
+logs/
+summaries/
+.env
+*.log
+server.pid
+.git/
+.gitignore
+*.md
