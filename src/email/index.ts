@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
 import dns from 'dns';
+import { Resend } from 'resend';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import timezone from 'dayjs/plugin/timezone';
@@ -21,25 +22,45 @@ interface DigestEpisode {
   markdownContent: string | null;
 }
 
-function createTransporter(): nodemailer.Transporter {
-  // Use port 587 + STARTTLS when secure=false, port 465 + SSL when secure=true
-  const useSecure = config.email.smtpPort === 465 ? true : config.email.smtpSecure;
-  const opts: any = {
-    host: config.email.smtpHost,
-    port: config.email.smtpPort,
-    secure: useSecure,
-    auth: {
-      user: config.email.smtpUser,
-      pass: config.email.smtpPass,
-    },
-    family: 4,
-    // Connection timeout 30s
-    connectionTimeout: 30000,
-    greetingTimeout: 30000,
-    socketTimeout: 30000,
-  };
-  logger.info('Creating SMTP transporter', { host: opts.host, port: opts.port, secure: opts.secure, family: opts.family });
-  return nodemailer.createTransport(opts);
+/**
+ * Send email via configured provider (resend or smtp)
+ */
+async function sendEmail(options: { from: string; to: string; subject: string; html: string }): Promise<void> {
+  const provider = config.email.provider;
+  logger.info(`Sending email via ${provider}`, { to: options.to, subject: options.subject.substring(0, 60) });
+
+  if (provider === 'resend') {
+    if (!config.email.resendApiKey) throw new Error('RESEND_API_KEY not configured');
+    const resend = new Resend(config.email.resendApiKey);
+    const result = await resend.emails.send({
+      from: options.from,
+      to: [options.to],
+      subject: options.subject,
+      html: options.html,
+    });
+    if (result.error) {
+      throw new Error(`Resend error: ${result.error.message}`);
+    }
+    logger.info('Email sent via Resend', { id: result.data?.id });
+  } else {
+    // SMTP
+    const useSecure = config.email.smtpPort === 465 ? true : config.email.smtpSecure;
+    const transporter = nodemailer.createTransport({
+      host: config.email.smtpHost,
+      port: config.email.smtpPort,
+      secure: useSecure,
+      auth: {
+        user: config.email.smtpUser,
+        pass: config.email.smtpPass,
+      },
+      family: 4,
+      connectionTimeout: 30000,
+      greetingTimeout: 30000,
+      socketTimeout: 30000,
+    } as any);
+    await transporter.sendMail(options);
+    logger.info('Email sent via SMTP');
+  }
 }
 
 /**
@@ -282,8 +303,12 @@ export async function sendDailyDigest(sinceHours: number = 24): Promise<{
     return { sent: false, episodeCount: 0, error: 'Email not enabled' };
   }
 
-  if (!config.email.smtpUser || !config.email.smtpPass) {
-    logger.warn('Email digest skipped: SMTP credentials not configured');
+  // Check provider-specific credentials
+  const provider = config.email.provider;
+  if (provider === 'resend' && !config.email.resendApiKey) {
+    return { sent: false, episodeCount: 0, error: 'RESEND_API_KEY not configured' };
+  }
+  if (provider === 'smtp' && (!config.email.smtpUser || !config.email.smtpPass)) {
     return { sent: false, episodeCount: 0, error: 'SMTP credentials not configured' };
   }
 
@@ -302,18 +327,13 @@ export async function sendDailyDigest(sinceHours: number = 24): Promise<{
 
     const dateStr = dayjs().tz('Asia/Shanghai').format('YYYY年MM月DD日');
     const html = buildDigestHtml(episodes, dateStr);
-
-    const transporter = createTransporter();
     const subject = `🎧 Podcast Digest - ${dateStr} (${episodes.length}篇新内容)`;
+    const from = config.email.fromAddress || config.email.smtpUser || 'Podcast Digest <onboarding@resend.dev>';
 
-    await transporter.sendMail({
-      from: config.email.fromAddress || config.email.smtpUser,
-      to: config.email.toAddress,
-      subject,
-      html,
-    });
+    await sendEmail({ from, to: config.email.toAddress, subject, html });
 
     logger.info('Daily digest email sent', {
+      provider,
       to: config.email.toAddress,
       episodeCount: episodes.length,
     });
@@ -327,17 +347,34 @@ export async function sendDailyDigest(sinceHours: number = 24): Promise<{
 }
 
 /**
- * Test SMTP connection
+ * Test email connection
  */
 export async function testEmailConnection(): Promise<{ success: boolean; error?: string }> {
-  if (!config.email.smtpUser || !config.email.smtpPass) {
-    return { success: false, error: 'SMTP credentials not configured' };
-  }
+  const provider = config.email.provider;
 
   try {
-    const transporter = createTransporter();
-    await transporter.verify();
-    return { success: true };
+    if (provider === 'resend') {
+      if (!config.email.resendApiKey) return { success: false, error: 'RESEND_API_KEY not configured' };
+      // Resend doesn't have a verify endpoint, send a test via the API
+      const resend = new Resend(config.email.resendApiKey);
+      // Just verify API key by listing domains
+      await resend.domains.list();
+      return { success: true };
+    } else {
+      if (!config.email.smtpUser || !config.email.smtpPass) {
+        return { success: false, error: 'SMTP credentials not configured' };
+      }
+      const transporter = nodemailer.createTransport({
+        host: config.email.smtpHost,
+        port: config.email.smtpPort,
+        secure: config.email.smtpPort === 465,
+        auth: { user: config.email.smtpUser, pass: config.email.smtpPass },
+        family: 4,
+        connectionTimeout: 30000,
+      } as any);
+      await transporter.verify();
+      return { success: true };
+    }
   } catch (error) {
     return { success: false, error: (error as Error).message };
   }

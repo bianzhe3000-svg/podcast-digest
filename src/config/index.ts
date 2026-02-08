@@ -84,11 +84,17 @@ export const config = {
 
   email: {
     enabled: envBool('EMAIL_ENABLED', false),
+    // Provider: 'smtp' or 'resend'
+    provider: env('EMAIL_PROVIDER', 'smtp') as 'smtp' | 'resend',
+    // SMTP settings
     smtpHost: env('EMAIL_SMTP_HOST', 'smtp.gmail.com'),
     smtpPort: envInt('EMAIL_SMTP_PORT', 465),
     smtpSecure: envBool('EMAIL_SMTP_SECURE', true),
     smtpUser: env('EMAIL_SMTP_USER', ''),
     smtpPass: env('EMAIL_SMTP_PASS', ''),
+    // Resend settings
+    resendApiKey: env('RESEND_API_KEY', ''),
+    // Common
     fromAddress: env('EMAIL_FROM', ''),
     toAddress: env('EMAIL_TO', ''),
     scheduleCron: env('EMAIL_SCHEDULE_CRON', '0 8 * * *'), // default: 8:00 Beijing time
