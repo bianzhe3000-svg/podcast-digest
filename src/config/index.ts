@@ -56,7 +56,7 @@ export const config = {
   },
 
   scheduler: {
-    cron: env('SCHEDULER_CRON', '0 15 * * *'),
+    cron: env('SCHEDULER_CRON', '0 2 * * *'),
     timezone: env('SCHEDULER_TIMEZONE', 'Asia/Shanghai'),
     enabled: envBool('SCHEDULER_ENABLED', true),
   },
