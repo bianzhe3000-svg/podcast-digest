@@ -226,11 +226,18 @@ export async function runFullPipeline(): Promise<{
     const succeeded = allResults.filter(r => r.status === 'success').length;
     const failed = allResults.filter(r => r.status === 'failed').length;
 
+    // Collect error details from failed episodes for debugging
+    const failedDetails = allResults
+      .filter(r => r.status === 'failed' && r.error)
+      .map(r => `[${r.episodeTitle}] ${r.error}`)
+      .join('\n');
+
     db.updateTaskLog(taskLogId, {
       status: failed > 0 && succeeded === 0 ? 'failed' : 'completed',
       total_episodes: allResults.length,
       processed_episodes: succeeded,
       failed_episodes: failed,
+      error_details: failedDetails || undefined,
     });
 
     logger.info('Full pipeline completed', {

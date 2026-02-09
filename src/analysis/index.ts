@@ -96,9 +96,9 @@ async function analyzeWithOpenAI(
           { role: 'user', content: userPrompt },
         ],
         temperature: 0.3,
-        max_tokens: 16000,
+        max_completion_tokens: 16000,
         response_format: { type: 'json_object' },
-      });
+      } as any);
     },
     { maxAttempts: 3, baseDelayMs: 10000 }
   );
