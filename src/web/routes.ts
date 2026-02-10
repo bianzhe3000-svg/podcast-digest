@@ -382,26 +382,6 @@ router.post('/documents/:podcast/:filename/pdf', async (req: Request, res: Respo
   }
 });
 
-// === Temporary: Upload documents (remove after sync) ===
-
-router.post('/documents/upload', (req: Request, res: Response) => {
-  try {
-    const { podcast, filename, content } = req.body;
-    if (!podcast || !filename || !content) {
-      res.status(400).json({ success: false, error: 'Missing podcast, filename, or content' });
-      return;
-    }
-    const dir = path.join(config.storage.summariesDir, podcast);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    fs.writeFileSync(path.join(dir, filename), content, 'utf-8');
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ success: false, error: (error as Error).message });
-  }
-});
-
 // === Logs ===
 
 router.get('/logs', (req: Request, res: Response) => {
