@@ -9,6 +9,7 @@ import { listMarkdownFiles, listMarkdownFilesWithMeta, readMarkdown } from '../m
 import { exportToPdf } from '../markdown/pdf';
 import { logger } from '../utils/logger';
 import path from 'path';
+import fs from 'fs';
 
 const router = Router();
 
@@ -376,6 +377,26 @@ router.post('/documents/:podcast/:filename/pdf', async (req: Request, res: Respo
     const mdPath = path.join(config.storage.summariesDir, podcast, filename);
     const pdfPath = await exportToPdf(mdPath);
     res.download(pdfPath);
+  } catch (error) {
+    res.status(500).json({ success: false, error: (error as Error).message });
+  }
+});
+
+// === Temporary: Upload documents (remove after sync) ===
+
+router.post('/documents/upload', (req: Request, res: Response) => {
+  try {
+    const { podcast, filename, content } = req.body;
+    if (!podcast || !filename || !content) {
+      res.status(400).json({ success: false, error: 'Missing podcast, filename, or content' });
+      return;
+    }
+    const dir = path.join(config.storage.summariesDir, podcast);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(path.join(dir, filename), content, 'utf-8');
+    res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false, error: (error as Error).message });
   }
