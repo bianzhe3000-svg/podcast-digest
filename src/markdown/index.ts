@@ -158,6 +158,47 @@ export function listMarkdownFiles(summariesDir: string): { podcast: string; file
   return result;
 }
 
+export interface MarkdownFileMeta {
+  podcast: string;
+  filename: string;
+  title: string;
+  date: string;
+}
+
+/** 扫描文件系统获取所有 markdown 文件及元数据（从文件头部解析标题） */
+export function listMarkdownFilesWithMeta(summariesDir: string): MarkdownFileMeta[] {
+  if (!fs.existsSync(summariesDir)) return [];
+
+  const results: MarkdownFileMeta[] = [];
+  const entries = fs.readdirSync(summariesDir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const podcastDir = path.join(summariesDir, entry.name);
+    const files = fs.readdirSync(podcastDir).filter(f => f.endsWith('.md'));
+
+    for (const file of files) {
+      // 从文件名提取日期 (格式: YYYY-MM-DD-podcast-summary.md)
+      const dateMatch = file.match(/^(\d{4}-\d{2}-\d{2})/);
+      const date = dateMatch ? dateMatch[1] : '';
+
+      // 从文件第一行 # 标题 解析标题
+      let title = file;
+      try {
+        const content = fs.readFileSync(path.join(podcastDir, file), 'utf-8');
+        const firstLine = content.split('\n').find(l => l.startsWith('# '));
+        if (firstLine) {
+          title = firstLine.replace(/^#\s+/, '').trim();
+        }
+      } catch { /* fallback to filename */ }
+
+      results.push({ podcast: entry.name, filename: file, title, date });
+    }
+  }
+
+  return results;
+}
+
 export function readMarkdown(summariesDir: string, podcast: string, filename: string): string | null {
   const filePath = path.join(summariesDir, podcast, filename);
   if (!fs.existsSync(filePath)) return null;

@@ -236,11 +236,17 @@ const App = {
       sidebar.innerHTML = docs.map(group => `
         <div class="doc-group">
           <h4>📂 ${this.escapeHtml(group.podcast)}</h4>
-          ${group.files.map(f => `
-            <div class="doc-item" onclick="App.viewDocument('${this.escapeHtml(group.podcast)}', '${f}')" data-doc="${group.podcast}/${f}">
-              ${f}
-            </div>
-          `).join('')}
+          ${(group.episodes || group.files || []).map(ep => {
+            if (typeof ep === 'string') {
+              // 兼容旧格式
+              return `<div class="doc-item" onclick="App.viewDocument('${this.escapeHtml(group.podcast)}', '${ep}')" data-doc="${group.podcast}/${ep}">${ep}</div>`;
+            }
+            return `
+            <div class="doc-item" onclick="App.viewDocument('${this.escapeHtml(group.podcast)}', '${ep.filename}')" data-doc="${group.podcast}/${ep.filename}">
+              <div class="doc-item-title">${this.escapeHtml(ep.title)}</div>
+              <div class="doc-item-date">${ep.date || ''}</div>
+            </div>`;
+          }).join('')}
         </div>
       `).join('');
     } catch (e) { /* handled */ }

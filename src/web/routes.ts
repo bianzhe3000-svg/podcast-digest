@@ -5,7 +5,7 @@ import { searchPodcasts, parseOPML, parseFeed, validateFeed } from '../rss';
 import { processEpisode, refreshAndProcessPodcast, runFullPipeline } from '../pipeline/processor';
 import { startScheduler, stopScheduler, getSchedulerStatus, triggerManualRun, triggerEmailDigest } from '../scheduler';
 import { sendDailyDigest, testEmailConnection } from '../email';
-import { listMarkdownFiles, readMarkdown } from '../markdown';
+import { listMarkdownFiles, listMarkdownFilesWithMeta, readMarkdown } from '../markdown';
 import { exportToPdf } from '../markdown/pdf';
 import { logger } from '../utils/logger';
 import path from 'path';
@@ -308,8 +308,47 @@ router.post('/scheduler/trigger', async (_req: Request, res: Response) => {
 
 router.get('/documents', (_req: Request, res: Response) => {
   try {
-    const files = listMarkdownFiles(config.storage.summariesDir);
-    res.json({ success: true, data: files });
+    const db = getDatabase();
+    // 从数据库获取已完成剧集的元数据
+    const dbEpisodes = db.getCompletedEpisodesWithDocs();
+
+    // 建立 markdown_path -> 数据库元数据 的映射
+    const dbMap = new Map<string, { title: string; date: string }>();
+    for (const ep of dbEpisodes) {
+      if (ep.markdown_path) {
+        const parts = ep.markdown_path.split('/');
+        const filename = parts[parts.length - 1];
+        const podcast = parts[parts.length - 2];
+        const key = `${podcast}/${filename}`;
+        dbMap.set(key, {
+          title: ep.episode_title,
+          date: ep.published_at ? ep.published_at.substring(0, 10) : ''
+        });
+      }
+    }
+
+    // 从文件系统扫描所有 markdown 文件（含 fallback 标题解析）
+    const fileMetas = listMarkdownFilesWithMeta(config.storage.summariesDir);
+
+    // 合并：优先用数据库标题，fallback 用文件解析的标题
+    const grouped: Record<string, { title: string; date: string; filename: string }[]> = {};
+    for (const fm of fileMetas) {
+      const key = `${fm.podcast}/${fm.filename}`;
+      const dbMeta = dbMap.get(key);
+      const title = dbMeta?.title || fm.title;
+      const date = dbMeta?.date || fm.date;
+
+      if (!grouped[fm.podcast]) grouped[fm.podcast] = [];
+      grouped[fm.podcast].push({ title, date, filename: fm.filename });
+    }
+
+    // 转换为数组格式，每个播客内按日期降序
+    const result = Object.entries(grouped).map(([podcast, episodes]) => ({
+      podcast,
+      episodes: episodes.sort((a, b) => b.date.localeCompare(a.date))
+    })).sort((a, b) => a.podcast.localeCompare(b.podcast));
+
+    res.json({ success: true, data: result });
   } catch (error) {
     res.status(500).json({ success: false, error: (error as Error).message });
   }
