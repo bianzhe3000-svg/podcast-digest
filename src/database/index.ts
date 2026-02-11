@@ -228,15 +228,19 @@ class DatabaseManager {
     `).all(`-${sinceHours} hours`) as Episode[];
   }
 
-  getCompletedEpisodesWithDocs(): { podcast_name: string; episode_title: string; published_at: string; processed_at: string; markdown_path: string }[] {
+  getCompletedEpisodesWithDocs(): { episode_id: number; podcast_name: string; episode_title: string; published_at: string; processed_at: string; markdown_path: string }[] {
     return this.db.prepare(`
-      SELECT p.name as podcast_name, e.title as episode_title, e.published_at, e.processed_at, a.markdown_path
+      SELECT e.id as episode_id, p.name as podcast_name, e.title as episode_title, e.published_at, e.processed_at, a.markdown_path
       FROM episodes e
       JOIN podcasts p ON e.podcast_id = p.id
       JOIN analysis_results a ON e.id = a.episode_id
       WHERE e.status = 'completed' AND a.markdown_path IS NOT NULL
       ORDER BY e.processed_at DESC
     `).all() as any[];
+  }
+
+  deleteAnalysisResult(episodeId: number): void {
+    this.db.prepare('DELETE FROM analysis_results WHERE episode_id = ?').run(episodeId);
   }
 
   // === Analysis Results ===

@@ -255,6 +255,41 @@ router.get('/episodes/:id/analysis', (req: Request, res: Response) => {
   }
 });
 
+// === Reprocess Episode ===
+
+router.post('/episodes/:id/reprocess', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const episodeId = parseInt(param(req, 'id'), 10);
+    const episode = db.getEpisodeById(episodeId);
+    if (!episode) {
+      res.status(404).json({ success: false, error: 'Episode not found' });
+      return;
+    }
+
+    const podcast = db.getPodcastById(episode.podcast_id);
+    if (!podcast) {
+      res.status(404).json({ success: false, error: 'Podcast not found' });
+      return;
+    }
+
+    // 删除旧的分析结果，重置状态为 pending
+    db.deleteAnalysisResult(episodeId);
+    db.updateEpisodeStatus(episodeId, 'pending');
+
+    res.json({ success: true, data: { message: `正在重新处理: ${episode.title}` } });
+
+    // 后台异步处理
+    processEpisode(podcast.name, episode).then(result => {
+      logger.info(`Reprocess done: ${episode.title}`, { status: result.status });
+    }).catch(error => {
+      logger.error(`Reprocess failed: ${episode.title}`, { error: (error as Error).message });
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: (error as Error).message });
+  }
+});
+
 // === Pipeline ===
 
 router.post('/pipeline/run', (_req: Request, res: Response) => {
@@ -314,7 +349,7 @@ router.get('/documents', (_req: Request, res: Response) => {
     const dbEpisodes = db.getCompletedEpisodesWithDocs();
 
     // 建立 markdown_path -> 数据库元数据 的映射
-    const dbMap = new Map<string, { title: string; date: string }>();
+    const dbMap = new Map<string, { episodeId: number; title: string; date: string }>();
     for (const ep of dbEpisodes) {
       if (ep.markdown_path) {
         const parts = ep.markdown_path.split('/');
@@ -322,6 +357,7 @@ router.get('/documents', (_req: Request, res: Response) => {
         const podcast = parts[parts.length - 2];
         const key = `${podcast}/${filename}`;
         dbMap.set(key, {
+          episodeId: ep.episode_id,
           title: ep.episode_title,
           date: ep.published_at ? ep.published_at.substring(0, 10) : ''
         });
@@ -332,15 +368,16 @@ router.get('/documents', (_req: Request, res: Response) => {
     const fileMetas = listMarkdownFilesWithMeta(config.storage.summariesDir);
 
     // 合并：优先用数据库标题，fallback 用文件解析的标题
-    const grouped: Record<string, { title: string; date: string; filename: string }[]> = {};
+    const grouped: Record<string, { episodeId: number | null; title: string; date: string; filename: string }[]> = {};
     for (const fm of fileMetas) {
       const key = `${fm.podcast}/${fm.filename}`;
       const dbMeta = dbMap.get(key);
       const title = dbMeta?.title || fm.title;
       const date = dbMeta?.date || fm.date;
+      const episodeId = dbMeta?.episodeId || null;
 
       if (!grouped[fm.podcast]) grouped[fm.podcast] = [];
-      grouped[fm.podcast].push({ title, date, filename: fm.filename });
+      grouped[fm.podcast].push({ episodeId, title, date, filename: fm.filename });
     }
 
     // 转换为数组格式，每个播客内按日期降序

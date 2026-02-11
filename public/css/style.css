@@ -576,6 +576,12 @@ h3 { font-size: 16px; margin-bottom: 12px; font-weight: 600; }
 }
 .btn-pdf:hover { background: #b91c1c; }
 
+.btn-warning {
+  background: var(--warning);
+  color: white;
+}
+.btn-warning:hover { background: #d97706; }
+
 /* Responsive */
 @media (max-width: 768px) {
   .sidebar { width: 60px; }

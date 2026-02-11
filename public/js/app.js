@@ -242,7 +242,7 @@ const App = {
               return `<div class="doc-item" onclick="App.viewDocument('${this.escapeHtml(group.podcast)}', '${ep}')" data-doc="${group.podcast}/${ep}">${ep}</div>`;
             }
             return `
-            <div class="doc-item" onclick="App.viewDocument('${this.escapeHtml(group.podcast)}', '${ep.filename}')" data-doc="${group.podcast}/${ep.filename}">
+            <div class="doc-item" onclick="App.viewDocument('${this.escapeHtml(group.podcast)}', '${ep.filename}', ${ep.episodeId || 'null'})" data-doc="${group.podcast}/${ep.filename}">
               <div class="doc-item-title">${this.escapeHtml(ep.title)}</div>
               <div class="doc-item-date">${ep.date || ''}</div>
             </div>`;
@@ -252,7 +252,7 @@ const App = {
     } catch (e) { /* handled */ }
   },
 
-  async viewDocument(podcast, filename) {
+  async viewDocument(podcast, filename, episodeId) {
     try {
       const doc = await this.api(`/documents/${encodeURIComponent(podcast)}/${encodeURIComponent(filename)}`);
       const viewer = document.getElementById('doc-viewer');
@@ -261,15 +261,31 @@ const App = {
       document.querySelectorAll('.doc-item').forEach(el => el.classList.remove('active'));
       document.querySelector(`.doc-item[data-doc="${podcast}/${filename}"]`)?.classList.add('active');
 
+      const reprocessBtn = episodeId
+        ? `<button class="btn btn-sm btn-warning" onclick="App.reprocessEpisode(${episodeId})">🔄 重新处理</button>`
+        : '';
+
       const html = marked.parse(doc.content);
       viewer.innerHTML = `
         <div class="actions" style="margin-bottom:16px;">
           <button class="btn btn-sm btn-pdf" onclick="App.exportPdf('${this.escapeHtml(podcast)}', '${filename}')">📥 导出PDF</button>
           <button class="btn btn-sm btn-secondary" onclick="App.downloadMarkdown('${this.escapeHtml(podcast)}', '${filename}')">📄 下载MD</button>
+          ${reprocessBtn}
         </div>
         ${html}
       `;
     } catch (e) { /* handled */ }
+  },
+
+  async reprocessEpisode(episodeId) {
+    if (!confirm('确定要重新处理这一集吗？将重新下载音频、转录并分析，需要几分钟时间。')) return;
+    this.toast('已开始重新处理，请稍候...', 'info');
+    try {
+      await this.api(`/episodes/${episodeId}/reprocess`, { method: 'POST' });
+      this.toast('重新处理任务已启动，完成后刷新页面查看结果', 'success');
+    } catch (e) {
+      this.toast(`重新处理失败: ${e.message}`, 'error');
+    }
   },
 
   async exportPdf(podcast, filename) {
