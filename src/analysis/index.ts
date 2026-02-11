@@ -43,10 +43,10 @@ export interface AnalysisOutput {
   knowledgePoints: KnowledgeCategory[];
 }
 
-// 单次分析的最大字符数（约 4 万字符 ≈ 6 万 token，留足空间给 prompt 和输出）
-const SINGLE_ANALYSIS_MAX_CHARS = 40000;
-// 分段时每段的最大字符数
-const CHUNK_MAX_CHARS = 30000;
+// 单次分析的最大字符数（约 2 万字符 ≈ 3-4 万 token，安全范围）
+const SINGLE_ANALYSIS_MAX_CHARS = 20000;
+// 分段时每段的最大字符数（1.5 万字符 ≈ 2-3 万 token，确保不超 GPT 上下文窗口）
+const CHUNK_MAX_CHARS = 15000;
 
 let openaiClient: OpenAI | null = null;
 
@@ -79,9 +79,10 @@ export async function analyzeContent(
       return analyzeWithOpenAI(transcript, episodeTitle, podcastName);
     }
     // 长文本：分段摘要 + 合并分析
+    const estimatedChunks = Math.ceil(transcript.length / CHUNK_MAX_CHARS);
     logger.info('Using chunked analysis for long transcript', {
       textLength: transcript.length,
-      estimatedChunks: Math.ceil(transcript.length / CHUNK_MAX_CHARS),
+      estimatedChunks,
     });
     return analyzeWithChunks(transcript, episodeTitle, podcastName);
   }
@@ -105,7 +106,7 @@ async function analyzeWithOpenAI(
 
   const response = await withRetry(
     async () => {
-      return client.chat.completions.create({
+      const result = await client.chat.completions.create({
         model: config.openai.model,
         messages: [
           { role: 'system', content: ANALYSIS_SYSTEM_PROMPT },
@@ -115,13 +116,20 @@ async function analyzeWithOpenAI(
         max_completion_tokens: 16000,
         response_format: { type: 'json_object' },
       } as any);
+
+      const content = result.choices[0]?.message?.content;
+      const finishReason = result.choices[0]?.finish_reason;
+      logger.info('Single-pass API response', { finishReason, contentLength: content?.length || 0 });
+
+      if (!content || content.length < 10) {
+        throw new Error(`Empty or too short response from API (finish_reason: ${finishReason}, length: ${content?.length || 0})`);
+      }
+      return result;
     },
     { maxAttempts: 3, baseDelayMs: 10000 }
   );
 
   const content = response.choices[0]?.message?.content || '{}';
-  logger.info('Analysis response received', { contentLength: content.length });
-
   return normalizeAnalysisResult(content);
 }
 
@@ -133,18 +141,24 @@ async function analyzeWithChunks(
 ): Promise<AnalysisOutput> {
   const client = getClient();
   const chunks = splitIntoChunks(transcript, CHUNK_MAX_CHARS);
-  logger.info(`Split transcript into ${chunks.length} chunks`);
+  logger.info(`Split transcript into ${chunks.length} chunks`, {
+    chunkSizes: chunks.map(c => c.length),
+  });
 
   // Phase 1: 对每段生成摘要
   const chunkSummaries: string[] = [];
   for (let i = 0; i < chunks.length; i++) {
-    logger.info(`Analyzing chunk ${i + 1}/${chunks.length}`, { chunkLength: chunks[i].length });
+    logger.info(`Analyzing chunk ${i + 1}/${chunks.length}`, {
+      chunkLength: chunks[i].length,
+      chunkPreview: chunks[i].substring(0, 100),
+    });
 
     const chunkPrompt = buildChunkSummaryPrompt(chunks[i], i + 1, chunks.length, episodeTitle, podcastName);
+    logger.info(`Chunk ${i + 1} prompt length: ${chunkPrompt.length}`);
 
     const response = await withRetry(
       async () => {
-        return client.chat.completions.create({
+        const result = await client.chat.completions.create({
           model: config.openai.model,
           messages: [
             { role: 'system', content: ANALYSIS_SYSTEM_PROMPT },
@@ -153,8 +167,23 @@ async function analyzeWithChunks(
           temperature: 0.3,
           max_completion_tokens: 4000,
         } as any);
+
+        const content = result.choices[0]?.message?.content;
+        const finishReason = result.choices[0]?.finish_reason;
+        logger.info(`Chunk ${i + 1} API response`, {
+          finishReason,
+          contentLength: content?.length || 0,
+          contentPreview: content?.substring(0, 100) || '(empty)',
+        });
+
+        // 如果返回空内容，抛错触发重试
+        if (!content || content.trim().length < 50) {
+          throw new Error(`Chunk ${i + 1} returned empty/short response (finish_reason: ${finishReason}, length: ${content?.length || 0})`);
+        }
+
+        return result;
       },
-      { maxAttempts: 3, baseDelayMs: 10000 }
+      { maxAttempts: 3, baseDelayMs: 15000 }
     );
 
     const summary = response.choices[0]?.message?.content || '';
@@ -162,9 +191,22 @@ async function analyzeWithChunks(
     logger.info(`Chunk ${i + 1} summary generated`, { summaryLength: summary.length });
   }
 
+  // 验证所有分段摘要都有内容
+  const emptySummaries = chunkSummaries.filter(s => s.trim().length < 50);
+  if (emptySummaries.length > 0) {
+    logger.error('Some chunk summaries are empty after retries', {
+      totalChunks: chunks.length,
+      emptyCount: emptySummaries.length,
+    });
+    throw new Error(`${emptySummaries.length} out of ${chunks.length} chunk summaries are empty`);
+  }
+
   // Phase 2: 合并所有分段摘要，生成最终结构化分析
   const mergedText = chunkSummaries.map((s, i) => `=== 第${i + 1}部分（共${chunks.length}部分）===\n${s}`).join('\n\n');
-  logger.info('Generating final merged analysis', { mergedTextLength: mergedText.length });
+  logger.info('Generating final merged analysis', {
+    mergedTextLength: mergedText.length,
+    chunkSummaryLengths: chunkSummaries.map(s => s.length),
+  });
 
   const mergePrompt = buildMergeAnalysisPrompt(mergedText, episodeTitle, podcastName, {
     summaryMinLength: config.analysis.summaryMinLength,
@@ -174,7 +216,7 @@ async function analyzeWithChunks(
 
   const finalResponse = await withRetry(
     async () => {
-      return client.chat.completions.create({
+      const result = await client.chat.completions.create({
         model: config.openai.model,
         messages: [
           { role: 'system', content: ANALYSIS_SYSTEM_PROMPT },
@@ -184,13 +226,20 @@ async function analyzeWithChunks(
         max_completion_tokens: 16000,
         response_format: { type: 'json_object' },
       } as any);
+
+      const content = result.choices[0]?.message?.content;
+      const finishReason = result.choices[0]?.finish_reason;
+      logger.info('Merge API response', { finishReason, contentLength: content?.length || 0 });
+
+      if (!content || content.length < 10) {
+        throw new Error(`Merge response empty (finish_reason: ${finishReason}, length: ${content?.length || 0})`);
+      }
+      return result;
     },
-    { maxAttempts: 3, baseDelayMs: 10000 }
+    { maxAttempts: 3, baseDelayMs: 15000 }
   );
 
   const content = finalResponse.choices[0]?.message?.content || '{}';
-  logger.info('Final merged analysis received', { contentLength: content.length });
-
   return normalizeAnalysisResult(content);
 }
 
