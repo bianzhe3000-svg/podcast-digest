@@ -43,10 +43,10 @@ export interface AnalysisOutput {
   knowledgePoints: KnowledgeCategory[];
 }
 
-// 单次分析的最大字符数（约 2 万字符 ≈ 3-4 万 token，安全范围）
-const SINGLE_ANALYSIS_MAX_CHARS = 20000;
-// 分段时每段的最大字符数（1.5 万字符 ≈ 2-3 万 token，确保不超 GPT 上下文窗口）
-const CHUNK_MAX_CHARS = 15000;
+// 单次分析的最大字符数（约 1 万字符，安全范围内）
+const SINGLE_ANALYSIS_MAX_CHARS = 10000;
+// 分段时每段的最大字符数（8000 字符 ≈ 1.2-1.6 万 token，兼容各种模型和代理）
+const CHUNK_MAX_CHARS = 8000;
 
 let openaiClient: OpenAI | null = null;
 
@@ -168,16 +168,24 @@ async function analyzeWithChunks(
           max_completion_tokens: 4000,
         } as any);
 
-        const content = result.choices[0]?.message?.content;
-        const finishReason = result.choices[0]?.finish_reason;
+        const content = result.choices?.[0]?.message?.content;
+        const finishReason = result.choices?.[0]?.finish_reason;
+        const choicesCount = result.choices?.length || 0;
+        const usageInfo = (result as any).usage;
         logger.info(`Chunk ${i + 1} API response`, {
           finishReason,
+          choicesCount,
           contentLength: content?.length || 0,
-          contentPreview: content?.substring(0, 100) || '(empty)',
+          contentPreview: content?.substring(0, 200) || '(empty)',
+          usage: usageInfo ? JSON.stringify(usageInfo) : 'N/A',
+          model: (result as any).model || 'unknown',
         });
 
         // 如果返回空内容，抛错触发重试
         if (!content || content.trim().length < 50) {
+          logger.error(`Chunk ${i + 1} empty response debug`, {
+            fullResponse: JSON.stringify(result).substring(0, 1000),
+          });
           throw new Error(`Chunk ${i + 1} returned empty/short response (finish_reason: ${finishReason}, length: ${content?.length || 0})`);
         }
 
