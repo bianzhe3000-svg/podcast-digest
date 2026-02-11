@@ -2,7 +2,7 @@ import OpenAI from 'openai';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { withRetry } from '../utils/retry';
-import { ANALYSIS_SYSTEM_PROMPT, buildAnalysisPrompt } from './prompts';
+import { ANALYSIS_SYSTEM_PROMPT, buildAnalysisPrompt, buildChunkSummaryPrompt, buildMergeAnalysisPrompt } from './prompts';
 
 export interface KeyPoint {
   title: string;
@@ -43,6 +43,11 @@ export interface AnalysisOutput {
   knowledgePoints: KnowledgeCategory[];
 }
 
+// 单次分析的最大字符数（约 4 万字符 ≈ 6 万 token，留足空间给 prompt 和输出）
+const SINGLE_ANALYSIS_MAX_CHARS = 40000;
+// 分段时每段的最大字符数
+const CHUNK_MAX_CHARS = 30000;
+
 let openaiClient: OpenAI | null = null;
 
 function getClient(): OpenAI {
@@ -68,12 +73,23 @@ export async function analyzeContent(
   });
 
   if (config.analysisProvider === 'openai') {
-    return analyzeWithOpenAI(transcript, episodeTitle, podcastName);
+    // 短文本：直接单次分析
+    if (transcript.length <= SINGLE_ANALYSIS_MAX_CHARS) {
+      logger.info('Using single-pass analysis', { textLength: transcript.length });
+      return analyzeWithOpenAI(transcript, episodeTitle, podcastName);
+    }
+    // 长文本：分段摘要 + 合并分析
+    logger.info('Using chunked analysis for long transcript', {
+      textLength: transcript.length,
+      estimatedChunks: Math.ceil(transcript.length / CHUNK_MAX_CHARS),
+    });
+    return analyzeWithChunks(transcript, episodeTitle, podcastName);
   }
 
   throw new Error(`Unsupported analysis provider: ${config.analysisProvider}`);
 }
 
+/** 单次直接分析（短文本） */
 async function analyzeWithOpenAI(
   transcript: string,
   episodeTitle: string,
@@ -107,6 +123,114 @@ async function analyzeWithOpenAI(
   logger.info('Analysis response received', { contentLength: content.length });
 
   return normalizeAnalysisResult(content);
+}
+
+/** 分段分析（长文本）：先对每段提取摘要，再合并生成最终分析 */
+async function analyzeWithChunks(
+  transcript: string,
+  episodeTitle: string,
+  podcastName: string
+): Promise<AnalysisOutput> {
+  const client = getClient();
+  const chunks = splitIntoChunks(transcript, CHUNK_MAX_CHARS);
+  logger.info(`Split transcript into ${chunks.length} chunks`);
+
+  // Phase 1: 对每段生成摘要
+  const chunkSummaries: string[] = [];
+  for (let i = 0; i < chunks.length; i++) {
+    logger.info(`Analyzing chunk ${i + 1}/${chunks.length}`, { chunkLength: chunks[i].length });
+
+    const chunkPrompt = buildChunkSummaryPrompt(chunks[i], i + 1, chunks.length, episodeTitle, podcastName);
+
+    const response = await withRetry(
+      async () => {
+        return client.chat.completions.create({
+          model: config.openai.model,
+          messages: [
+            { role: 'system', content: ANALYSIS_SYSTEM_PROMPT },
+            { role: 'user', content: chunkPrompt },
+          ],
+          temperature: 0.3,
+          max_completion_tokens: 4000,
+        } as any);
+      },
+      { maxAttempts: 3, baseDelayMs: 10000 }
+    );
+
+    const summary = response.choices[0]?.message?.content || '';
+    chunkSummaries.push(summary);
+    logger.info(`Chunk ${i + 1} summary generated`, { summaryLength: summary.length });
+  }
+
+  // Phase 2: 合并所有分段摘要，生成最终结构化分析
+  const mergedText = chunkSummaries.map((s, i) => `=== 第${i + 1}部分（共${chunks.length}部分）===\n${s}`).join('\n\n');
+  logger.info('Generating final merged analysis', { mergedTextLength: mergedText.length });
+
+  const mergePrompt = buildMergeAnalysisPrompt(mergedText, episodeTitle, podcastName, {
+    summaryMinLength: config.analysis.summaryMinLength,
+    summaryMaxLength: config.analysis.summaryMaxLength,
+    keyPointsCount: config.analysis.keyPointsCount,
+  });
+
+  const finalResponse = await withRetry(
+    async () => {
+      return client.chat.completions.create({
+        model: config.openai.model,
+        messages: [
+          { role: 'system', content: ANALYSIS_SYSTEM_PROMPT },
+          { role: 'user', content: mergePrompt },
+        ],
+        temperature: 0.3,
+        max_completion_tokens: 16000,
+        response_format: { type: 'json_object' },
+      } as any);
+    },
+    { maxAttempts: 3, baseDelayMs: 10000 }
+  );
+
+  const content = finalResponse.choices[0]?.message?.content || '{}';
+  logger.info('Final merged analysis received', { contentLength: content.length });
+
+  return normalizeAnalysisResult(content);
+}
+
+/** 按段落边界将文本分成多个 chunk */
+function splitIntoChunks(text: string, maxChars: number): string[] {
+  if (text.length <= maxChars) return [text];
+
+  const chunks: string[] = [];
+  let start = 0;
+
+  while (start < text.length) {
+    let end = start + maxChars;
+
+    if (end >= text.length) {
+      chunks.push(text.substring(start));
+      break;
+    }
+
+    // 尝试在段落边界（换行符）处断开
+    const lastNewline = text.lastIndexOf('\n', end);
+    if (lastNewline > start + maxChars * 0.7) {
+      end = lastNewline + 1;
+    } else {
+      // 退而求其次：在句号处断开
+      const lastPeriod = Math.max(
+        text.lastIndexOf('。', end),
+        text.lastIndexOf('. ', end),
+        text.lastIndexOf('！', end),
+        text.lastIndexOf('？', end)
+      );
+      if (lastPeriod > start + maxChars * 0.7) {
+        end = lastPeriod + 1;
+      }
+    }
+
+    chunks.push(text.substring(start, end));
+    start = end;
+  }
+
+  return chunks;
 }
 
 function normalizeAnalysisResult(jsonStr: string): AnalysisOutput {
@@ -155,7 +279,7 @@ function normalizeAnalysisResult(jsonStr: string): AnalysisOutput {
 
     return { summary, keyPoints, keywords, fullRecap, mainArguments, knowledgePoints };
   } catch (error) {
-    logger.error('Failed to parse analysis result', { error: (error as Error).message });
+    logger.error('Failed to parse analysis result', { error: (error as Error).message, raw: jsonStr.substring(0, 500) });
     return {
       summary: '分析结果解析失败',
       keyPoints: [],
