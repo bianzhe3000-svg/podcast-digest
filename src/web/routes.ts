@@ -391,7 +391,13 @@ router.get('/documents', (_req: Request, res: Response) => {
       const dbMeta = dbMap.get(key);
       const title = dbMeta?.title || fm.title;
       const date = dbMeta?.date || fm.date;
-      const episodeId = dbMeta?.episodeId || null;
+      let episodeId: number | null = dbMeta?.episodeId || null;
+
+      // 如果没有通过 analysis_results 匹配到，尝试通过播客名+日期反查
+      if (!episodeId && fm.date) {
+        const found = db.findEpisodeByPodcastAndDate(fm.podcast, fm.date);
+        if (found) episodeId = found.episode_id;
+      }
 
       if (!grouped[fm.podcast]) grouped[fm.podcast] = [];
       grouped[fm.podcast].push({ episodeId, title, date, filename: fm.filename });

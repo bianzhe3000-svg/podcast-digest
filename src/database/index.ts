@@ -234,9 +234,20 @@ class DatabaseManager {
       FROM episodes e
       JOIN podcasts p ON e.podcast_id = p.id
       JOIN analysis_results a ON e.id = a.episode_id
-      WHERE e.status = 'completed' AND a.markdown_path IS NOT NULL
+      WHERE a.markdown_path IS NOT NULL
       ORDER BY e.processed_at DESC
     `).all() as any[];
+  }
+
+  /** 通过播客名和发布日期反查 episodeId（用于没有 analysis_results 的文件） */
+  findEpisodeByPodcastAndDate(podcastName: string, publishedDate: string): { episode_id: number } | undefined {
+    return this.db.prepare(`
+      SELECT e.id as episode_id
+      FROM episodes e
+      JOIN podcasts p ON e.podcast_id = p.id
+      WHERE p.name = ? AND e.published_at LIKE ?
+      LIMIT 1
+    `).get(podcastName, `${publishedDate}%`) as any;
   }
 
   deleteAnalysisResult(episodeId: number): void {
