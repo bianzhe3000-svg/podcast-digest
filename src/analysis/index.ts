@@ -113,7 +113,7 @@ async function analyzeWithOpenAI(
           { role: 'user', content: userPrompt },
         ],
         temperature: 0.3,
-        max_completion_tokens: 16000,
+        max_completion_tokens: 65536,
         response_format: { type: 'json_object' },
       } as any);
 
@@ -165,7 +165,7 @@ async function analyzeWithChunks(
             { role: 'user', content: chunkPrompt },
           ],
           temperature: 0.3,
-          max_completion_tokens: 16000,
+          max_completion_tokens: 32000,
         } as any);
 
         const content = result.choices?.[0]?.message?.content;
@@ -231,7 +231,7 @@ async function analyzeWithChunks(
           { role: 'user', content: mergePrompt },
         ],
         temperature: 0.3,
-        max_completion_tokens: 16000,
+        max_completion_tokens: 65536,
         response_format: { type: 'json_object' },
       } as any);
 
