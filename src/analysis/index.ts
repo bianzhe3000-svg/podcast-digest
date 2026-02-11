@@ -165,7 +165,7 @@ async function analyzeWithChunks(
             { role: 'user', content: chunkPrompt },
           ],
           temperature: 0.3,
-          max_completion_tokens: 4000,
+          max_completion_tokens: 16000,
         } as any);
 
         const content = result.choices?.[0]?.message?.content;
