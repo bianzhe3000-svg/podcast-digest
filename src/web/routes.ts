@@ -277,13 +277,30 @@ router.post('/episodes/:id/reprocess', (req: Request, res: Response) => {
     db.deleteAnalysisResult(episodeId);
     db.updateEpisodeStatus(episodeId, 'pending');
 
-    res.json({ success: true, data: { message: `正在重新处理: ${episode.title}` } });
+    // 创建任务日志
+    const taskLogId = db.createTaskLog(`reprocess_${episode.title}`);
+
+    res.json({ success: true, data: { message: `正在重新处理: ${episode.title}`, taskLogId } });
 
     // 后台异步处理
     processEpisode(podcast.name, episode).then(result => {
-      logger.info(`Reprocess done: ${episode.title}`, { status: result.status });
+      db.updateTaskLog(taskLogId, {
+        status: result.status === 'success' ? 'completed' : 'failed',
+        total_episodes: 1,
+        processed_episodes: result.status === 'success' ? 1 : 0,
+        failed_episodes: result.status === 'failed' ? 1 : 0,
+        error_details: result.error || undefined,
+      });
+      logger.info(`Reprocess done: ${episode.title}`, { status: result.status, taskLogId });
     }).catch(error => {
-      logger.error(`Reprocess failed: ${episode.title}`, { error: (error as Error).message });
+      db.updateTaskLog(taskLogId, {
+        status: 'failed',
+        total_episodes: 1,
+        processed_episodes: 0,
+        failed_episodes: 1,
+        error_details: (error as Error).message,
+      });
+      logger.error(`Reprocess failed: ${episode.title}`, { error: (error as Error).message, taskLogId });
     });
   } catch (error) {
     res.status(500).json({ success: false, error: (error as Error).message });
