@@ -1,5 +1,7 @@
 import nodemailer from 'nodemailer';
 import dns from 'dns';
+import fs from 'fs';
+import path from 'path';
 import { Resend } from 'resend';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
@@ -8,6 +10,7 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import { getDatabase, AnalysisResult, Episode, Podcast } from '../database';
 import { readMarkdown } from '../markdown';
+import { exportToPdf } from '../markdown/pdf';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -22,12 +25,18 @@ interface DigestEpisode {
   markdownContent: string | null;
 }
 
+interface EmailAttachment {
+  filename: string;
+  content: Buffer;
+  contentType?: string;
+}
+
 /**
  * Send email via configured provider (resend or smtp)
  */
-async function sendEmail(options: { from: string; to: string; subject: string; html: string }): Promise<void> {
+async function sendEmail(options: { from: string; to: string; subject: string; html: string; attachments?: EmailAttachment[] }): Promise<void> {
   const provider = config.email.provider;
-  logger.info(`Sending email via ${provider}`, { to: options.to, subject: options.subject.substring(0, 60) });
+  logger.info(`Sending email via ${provider}`, { to: options.to, subject: options.subject.substring(0, 60), attachments: options.attachments?.length || 0 });
 
   if (provider === 'resend') {
     if (!config.email.resendApiKey) throw new Error('RESEND_API_KEY not configured');
@@ -37,6 +46,11 @@ async function sendEmail(options: { from: string; to: string; subject: string; h
       to: [options.to],
       subject: options.subject,
       html: options.html,
+      attachments: options.attachments?.map(a => ({
+        filename: a.filename,
+        content: a.content,
+        contentType: a.contentType || 'application/pdf',
+      })),
     });
     if (result.error) {
       throw new Error(`Resend error: ${result.error.message}`);
@@ -58,7 +72,14 @@ async function sendEmail(options: { from: string; to: string; subject: string; h
       greetingTimeout: 30000,
       socketTimeout: 30000,
     } as any);
-    await transporter.sendMail(options);
+    await transporter.sendMail({
+      ...options,
+      attachments: options.attachments?.map(a => ({
+        filename: a.filename,
+        content: a.content,
+        contentType: a.contentType || 'application/pdf',
+      })),
+    });
     logger.info('Email sent via SMTP');
   }
 }
@@ -330,12 +351,50 @@ export async function sendDailyDigest(sinceHours: number = 24): Promise<{
     const subject = `🎧 Podcast Digest - ${dateStr} (${episodes.length}篇新内容)`;
     const from = config.email.fromAddress || config.email.smtpUser || 'Podcast Digest <onboarding@resend.dev>';
 
-    await sendEmail({ from, to: config.email.toAddress, subject, html });
+    // Generate PDF attachments from markdown files
+    const attachments: EmailAttachment[] = [];
+    for (const ep of episodes) {
+      if (!ep.analysis.markdown_path) continue;
+      try {
+        const parts = ep.analysis.markdown_path.split('/');
+        const podcastDir = parts[parts.length - 2];
+        const filename = parts[parts.length - 1];
+        const mdPath = path.join(config.storage.summariesDir, podcastDir, filename);
+
+        if (!fs.existsSync(mdPath)) {
+          logger.warn('Markdown file not found for PDF, skipping', { path: mdPath });
+          continue;
+        }
+
+        const pdfPath = await exportToPdf(mdPath);
+        const pdfBuffer = fs.readFileSync(pdfPath);
+        const pubDate = dayjs(ep.episode.published_at).format('YYYY-MM-DD');
+        const safePodcast = ep.podcast.name.replace(/[/\\?%*:|"<>]/g, '-').trim();
+        attachments.push({
+          filename: `${safePodcast}-${pubDate}.pdf`,
+          content: pdfBuffer,
+          contentType: 'application/pdf',
+        });
+
+        // Clean up temp PDF file
+        try { fs.unlinkSync(pdfPath); } catch {}
+      } catch (err) {
+        logger.warn('Failed to generate PDF attachment, skipping', {
+          episode: ep.episode.title,
+          error: (err as Error).message,
+        });
+      }
+    }
+
+    logger.info('PDF attachments prepared', { count: attachments.length });
+
+    await sendEmail({ from, to: config.email.toAddress, subject, html, attachments });
 
     logger.info('Daily digest email sent', {
       provider,
       to: config.email.toAddress,
       episodeCount: episodes.length,
+      pdfAttachments: attachments.length,
     });
 
     return { sent: true, episodeCount: episodes.length };
