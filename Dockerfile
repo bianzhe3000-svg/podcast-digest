@@ -1,7 +1,7 @@
 FROM node:20-slim
 
-# Install ffmpeg for audio processing
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+# Install ffmpeg for audio processing and Chinese fonts for PDF generation
+RUN apt-get update && apt-get install -y ffmpeg fonts-noto-cjk && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

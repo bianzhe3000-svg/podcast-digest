@@ -1,7 +1,5 @@
 import nodemailer from 'nodemailer';
 import dns from 'dns';
-import fs from 'fs';
-import path from 'path';
 import { Resend } from 'resend';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
@@ -10,7 +8,7 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import { getDatabase, AnalysisResult, Episode, Podcast } from '../database';
 import { readMarkdown } from '../markdown';
-import { exportToPdf } from '../markdown/pdf';
+import { generateEpisodePdf } from '../markdown/pdf';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -351,23 +349,26 @@ export async function sendDailyDigest(sinceHours: number = 24): Promise<{
     const subject = `🎧 Podcast Digest - ${dateStr} (${episodes.length}篇新内容)`;
     const from = config.email.fromAddress || config.email.smtpUser || 'Podcast Digest <onboarding@resend.dev>';
 
-    // Generate PDF attachments from markdown files
+    // Generate PDF attachments directly from analysis data
     const attachments: EmailAttachment[] = [];
     for (const ep of episodes) {
-      if (!ep.analysis.markdown_path) continue;
       try {
-        const parts = ep.analysis.markdown_path.split('/');
-        const podcastDir = parts[parts.length - 2];
-        const filename = parts[parts.length - 1];
-        const mdPath = path.join(config.storage.summariesDir, podcastDir, filename);
+        let keyPoints: { title: string; detail: string }[] = [];
+        let keywords: { word: string; context: string }[] = [];
+        try { keyPoints = JSON.parse(ep.analysis.key_points || '[]'); } catch {}
+        try { keywords = JSON.parse(ep.analysis.arguments || '[]'); } catch {}
 
-        if (!fs.existsSync(mdPath)) {
-          logger.warn('Markdown file not found for PDF, skipping', { path: mdPath });
-          continue;
-        }
+        const pdfBuffer = await generateEpisodePdf({
+          podcastName: ep.podcast.name,
+          episodeTitle: ep.episode.title,
+          publishedAt: ep.episode.published_at,
+          durationSeconds: ep.episode.duration_seconds || undefined,
+          summary: ep.analysis.summary || '',
+          keyPoints,
+          keywords,
+          fullRecap: ep.analysis.knowledge_points || '',
+        });
 
-        const pdfPath = await exportToPdf(mdPath);
-        const pdfBuffer = fs.readFileSync(pdfPath);
         const pubDate = dayjs(ep.episode.published_at).format('YYYY-MM-DD');
         const safePodcast = ep.podcast.name.replace(/[/\\?%*:|"<>]/g, '-').trim();
         attachments.push({
@@ -375,9 +376,6 @@ export async function sendDailyDigest(sinceHours: number = 24): Promise<{
           content: pdfBuffer,
           contentType: 'application/pdf',
         });
-
-        // Clean up temp PDF file
-        try { fs.unlinkSync(pdfPath); } catch {}
       } catch (err) {
         logger.warn('Failed to generate PDF attachment, skipping', {
           episode: ep.episode.title,
