@@ -8,7 +8,7 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import { getDatabase, AnalysisResult, Episode, Podcast } from '../database';
 import { readMarkdown } from '../markdown';
-import { generateEpisodePdf } from '../markdown/pdf';
+import { generateDigestPdf, PdfEpisodeData } from '../markdown/pdf';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -351,16 +351,16 @@ export async function sendDailyDigest(sinceHours: number = 24): Promise<{
     const subject = `🎧 Podcast Digest - ${dateStr} (${episodes.length}篇新内容)`;
     const from = config.email.fromAddress || config.email.smtpUser || 'Podcast Digest <onboarding@resend.dev>';
 
-    // Generate PDF attachments directly from analysis data
+    // Generate single digest PDF containing all episodes
     const attachments: EmailAttachment[] = [];
-    for (const ep of episodes) {
-      try {
+    try {
+      const pdfEpisodes: PdfEpisodeData[] = episodes.map(ep => {
         let keyPoints: { title: string; detail: string }[] = [];
         let keywords: { word: string; context: string }[] = [];
         try { keyPoints = JSON.parse(ep.analysis.key_points || '[]'); } catch {}
         try { keywords = JSON.parse(ep.analysis.arguments || '[]'); } catch {}
 
-        const pdfBuffer = await generateEpisodePdf({
+        return {
           podcastName: ep.podcast.name,
           episodeTitle: ep.episode.title,
           publishedAt: ep.episode.published_at,
@@ -369,24 +369,21 @@ export async function sendDailyDigest(sinceHours: number = 24): Promise<{
           keyPoints,
           keywords,
           fullRecap: ep.analysis.knowledge_points || '',
-        });
+        };
+      });
 
-        const pubDate = dayjs(ep.episode.published_at).format('YYYY-MM-DD');
-        const safePodcast = ep.podcast.name.replace(/[/\\?%*:|"<>]/g, '-').trim();
-        attachments.push({
-          filename: `${safePodcast}-${pubDate}.pdf`,
-          content: pdfBuffer,
-          contentType: 'application/pdf',
-        });
-      } catch (err) {
-        logger.warn('Failed to generate PDF attachment, skipping', {
-          episode: ep.episode.title,
-          error: (err as Error).message,
-        });
-      }
+      const pdfBuffer = await generateDigestPdf(pdfEpisodes, dateStr);
+      attachments.push({
+        filename: `Podcast-Digest-${dayjs().tz('Asia/Shanghai').format('YYYY-MM-DD')}.pdf`,
+        content: pdfBuffer,
+        contentType: 'application/pdf',
+      });
+      logger.info('Digest PDF prepared', { size: pdfBuffer.length, episodes: pdfEpisodes.length });
+    } catch (err) {
+      logger.warn('Failed to generate digest PDF, sending email without attachment', {
+        error: (err as Error).message,
+      });
     }
-
-    logger.info('PDF attachments prepared', { count: attachments.length });
 
     await sendEmail({ from, to: config.email.toAddress, subject, html, attachments });
 
