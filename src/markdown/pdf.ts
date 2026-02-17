@@ -137,10 +137,12 @@ export async function generateEpisodePdf(data: PdfEpisodeData): Promise<Buffer> 
   y = doc.y + 16;
   doc.fillColor('#333333');
 
-  // === Helper: Section Header ===
-  const sectionHeader = (icon: string, title: string) => {
+  // === Helper: Section Header (with named destination for TOC links) ===
+  const sectionHeader = (icon: string, title: string, destName: string) => {
     checkPageBreak(doc, 60);
     y = doc.y;
+    // 添加命名锚点供目录跳转
+    doc.addNamedDestination(destName);
     doc.font(fontBold).fontSize(13).fillColor('#667eea');
     doc.text(`${icon} ${title}`, 50, y, { width: pageWidth });
     y = doc.y + 2;
@@ -150,15 +152,49 @@ export async function generateEpisodePdf(data: PdfEpisodeData): Promise<Buffer> 
     doc.y = y;
   };
 
+  // === Table of Contents ===
+  const tocSections: { icon: string; title: string; dest: string }[] = [
+    { icon: '📝', title: '内容核心摘要', dest: 'section-summary' },
+  ];
+  if (data.keyPoints && data.keyPoints.length > 0) {
+    tocSections.push({ icon: '🎯', title: '核心要点', dest: 'section-keypoints' });
+  }
+  if (data.keywords && data.keywords.length > 0) {
+    tocSections.push({ icon: '🔑', title: '核心关键词分析', dest: 'section-keywords' });
+  }
+  if (data.fullRecap) {
+    tocSections.push({ icon: '📖', title: '长版内容纪要', dest: 'section-recap' });
+  }
+
+  doc.font(fontBold).fontSize(12).fillColor('#555555');
+  doc.text('📋 目录', 50, doc.y, { width: pageWidth });
+  doc.y += 4;
+  doc.moveTo(50, doc.y).lineTo(50 + pageWidth, doc.y).strokeColor('#e8e8e8').lineWidth(0.5).stroke();
+  doc.y += 6;
+
+  for (let i = 0; i < tocSections.length; i++) {
+    const sec = tocSections[i];
+    doc.font(fontName).fontSize(10.5).fillColor('#667eea');
+    doc.text(`${i + 1}. ${sec.icon} ${sec.title}`, 60, doc.y, {
+      width: pageWidth - 20,
+      goTo: sec.dest,
+      underline: false,
+    } as any);
+    doc.y += 2;
+  }
+
+  doc.fillColor('#333333');
+  doc.y += 12;
+
   // === Section 1: Summary ===
-  sectionHeader('📝', '内容核心摘要');
+  sectionHeader('📝', '内容核心摘要', 'section-summary');
   doc.font(fontName).fontSize(10.5);
   doc.text(data.summary || '（暂无摘要）', 50, doc.y, { width: pageWidth, lineGap: 4 });
   doc.y += 12;
 
   // === Section 2: Key Points ===
   if (data.keyPoints && data.keyPoints.length > 0) {
-    sectionHeader('🎯', '核心要点');
+    sectionHeader('🎯', '核心要点', 'section-keypoints');
     for (const kp of data.keyPoints) {
       checkPageBreak(doc, 40);
       // Draw left border
@@ -181,7 +217,7 @@ export async function generateEpisodePdf(data: PdfEpisodeData): Promise<Buffer> 
 
   // === Section 3: Keywords ===
   if (data.keywords && data.keywords.length > 0) {
-    sectionHeader('🔑', '核心关键词分析');
+    sectionHeader('🔑', '核心关键词分析', 'section-keywords');
     for (const kw of data.keywords) {
       checkPageBreak(doc, 40);
       doc.font(fontBold).fontSize(10.5).fillColor('#667eea');
@@ -195,7 +231,7 @@ export async function generateEpisodePdf(data: PdfEpisodeData): Promise<Buffer> 
 
   // === Section 4: Full Recap ===
   if (data.fullRecap) {
-    sectionHeader('📖', '长版内容纪要');
+    sectionHeader('📖', '长版内容纪要', 'section-recap');
     doc.font(fontName).fontSize(10).fillColor('#444444');
     doc.text(data.fullRecap, 50, doc.y, { width: pageWidth, lineGap: 4 });
     doc.y += 12;

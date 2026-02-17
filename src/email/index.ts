@@ -156,6 +156,8 @@ function buildDigestHtml(episodes: DigestEpisode[], dateStr: string): string {
   .toc h2 { font-size: 16px; margin: 0 0 10px 0; color: #555; }
   .toc ul { margin: 0; padding: 0 0 0 20px; }
   .toc li { margin: 5px 0; font-size: 14px; color: #444; }
+  .toc a { color: #667eea; text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
 
   .podcast-section { padding: 0 30px; }
   .podcast-header { padding: 24px 0 12px 0; border-bottom: 3px solid #667eea; margin-top: 24px; }
@@ -209,7 +211,7 @@ function buildDigestHtml(episodes: DigestEpisode[], dateStr: string): string {
   for (const [podcastName, eps] of episodesByPodcast) {
     for (const ep of eps) {
       epIndex++;
-      html += `\n      <li>${epIndex}. <strong>${escapeHtml(podcastName)}</strong> — ${escapeHtml(ep.episode.title)}</li>`;
+      html += `\n      <li><a href="#ep-${epIndex}">${epIndex}. <strong>${escapeHtml(podcastName)}</strong> — ${escapeHtml(ep.episode.title)}</a></li>`;
     }
   }
   html += `
@@ -241,7 +243,7 @@ function buildDigestHtml(episodes: DigestEpisode[], dateStr: string): string {
       fullRecap = ep.analysis.knowledge_points || '';
 
       html += `
-    <div class="episode">
+    <div class="episode" id="ep-${epIndex}">
       <h3 class="episode-title">${epIndex}. ${escapeHtml(ep.episode.title)}</h3>
       <div class="episode-meta">📅 ${pubDate}${duration ? ` &nbsp;·&nbsp; ⏱️ ${duration}` : ''}${ep.episode.audio_url ? ` &nbsp;·&nbsp; <a href="${escapeHtml(ep.episode.audio_url)}" style="color:#667eea;">收听原始音频</a>` : ''}</div>`;
 
