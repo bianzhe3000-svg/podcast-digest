@@ -1,3 +1,4 @@
+import dns from 'dns';
 import express from 'express';
 import path from 'path';
 import { config, ensureDirectories } from './config';
@@ -5,6 +6,9 @@ import { logger } from './utils/logger';
 import { getDatabase } from './database';
 import { startScheduler } from './scheduler';
 import apiRoutes from './web/routes';
+
+// Force Node.js to prefer IPv4 globally (fixes Railway IPv6 connection failures)
+dns.setDefaultResultOrder('ipv4first');
 
 // Ensure required directories exist
 ensureDirectories();
