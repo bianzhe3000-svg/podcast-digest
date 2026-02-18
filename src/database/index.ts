@@ -250,6 +250,29 @@ class DatabaseManager {
     `).get(podcastName, `${publishedDate}%`) as any;
   }
 
+  /** 获取所有失败的剧集（带播客名） */
+  getFailedEpisodes(): (Episode & { podcast_name: string })[] {
+    return this.db.prepare(`
+      SELECT e.*, p.name as podcast_name FROM episodes e
+      JOIN podcasts p ON e.podcast_id = p.id
+      WHERE e.status = 'failed' AND e.audio_url IS NOT NULL
+      ORDER BY e.published_at DESC
+    `).all() as (Episode & { podcast_name: string })[];
+  }
+
+  /** 批量重置失败剧集为 pending（同时删除旧的分析结果） */
+  resetFailedEpisodes(): number {
+    const failed = this.getFailedEpisodes();
+    for (const ep of failed) {
+      this.deleteAnalysisResult(ep.id);
+    }
+    const result = this.db.prepare(`
+      UPDATE episodes SET status = 'pending', processed_at = NULL
+      WHERE status = 'failed' AND audio_url IS NOT NULL
+    `).run();
+    return result.changes;
+  }
+
   deleteAnalysisResult(episodeId: number): void {
     this.db.prepare('DELETE FROM analysis_results WHERE episode_id = ?').run(episodeId);
   }

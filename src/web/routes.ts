@@ -328,6 +328,78 @@ router.post('/pipeline/run', (_req: Request, res: Response) => {
   }
 });
 
+// === Retry Failed Episodes ===
+
+router.post('/pipeline/retry-failed', (_req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const failedEpisodes = db.getFailedEpisodes();
+    if (failedEpisodes.length === 0) {
+      res.json({ success: true, data: { message: '没有失败的剧集需要重试', count: 0 } });
+      return;
+    }
+
+    // 重置所有失败剧集为 pending
+    const resetCount = db.resetFailedEpisodes();
+    const taskLogId = db.createTaskLog('retry_failed_episodes');
+    logger.info(`Reset ${resetCount} failed episodes to pending, starting reprocess`);
+
+    res.json({
+      success: true,
+      data: { message: `已重置 ${resetCount} 个失败剧集，开始重新处理`, count: resetCount, taskLogId },
+    });
+
+    // 后台逐集处理，处理完成后自动发邮件
+    (async () => {
+      const results: { status: string; title: string; error?: string }[] = [];
+      // 重新查询 pending 剧集（刚被重置的那些）
+      for (const ep of failedEpisodes) {
+        try {
+          const freshEp = db.getEpisodeById(ep.id);
+          if (!freshEp) continue;
+          const result = await processEpisode(ep.podcast_name, freshEp);
+          results.push({ status: result.status, title: result.episodeTitle, error: result.error });
+          logger.info(`Retry result: ${result.episodeTitle} => ${result.status}`);
+        } catch (error) {
+          results.push({ status: 'failed', title: ep.title, error: (error as Error).message });
+          logger.error(`Retry failed: ${ep.title}`, { error: (error as Error).message });
+        }
+      }
+
+      const succeeded = results.filter(r => r.status === 'success').length;
+      const failed = results.filter(r => r.status === 'failed').length;
+
+      const failedDetails = results
+        .filter(r => r.status === 'failed' && r.error)
+        .map(r => `[${r.title}] ${r.error}`)
+        .join('\n');
+
+      db.updateTaskLog(taskLogId, {
+        status: failed > 0 && succeeded === 0 ? 'failed' : 'completed',
+        total_episodes: results.length,
+        processed_episodes: succeeded,
+        failed_episodes: failed,
+        error_details: failedDetails || undefined,
+      });
+
+      logger.info(`Retry completed: ${succeeded} ok, ${failed} failed out of ${results.length}`);
+
+      // 处理完成后立即发送邮件摘要（覆盖范围=最近48小时，确保今天重处理的都能被包含）
+      if (succeeded > 0) {
+        try {
+          logger.info('Sending email digest after retry...');
+          const emailResult = await sendDailyDigest(48);
+          logger.info('Post-retry email sent', emailResult);
+        } catch (emailError) {
+          logger.error('Post-retry email failed', { error: (emailError as Error).message });
+        }
+      }
+    })();
+  } catch (error) {
+    res.status(500).json({ success: false, error: (error as Error).message });
+  }
+});
+
 // === Scheduler ===
 
 router.get('/scheduler/status', (_req: Request, res: Response) => {
