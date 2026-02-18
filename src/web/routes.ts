@@ -522,4 +522,39 @@ router.get('/settings', (_req: Request, res: Response) => {
   });
 });
 
+// === Network Diagnostics ===
+router.get('/debug/network', async (_req: Request, res: Response) => {
+  const dns = await import('dns');
+  const results: Record<string, any> = {};
+
+  // Test DNS resolution
+  for (const host of ['api.openai.com', 'resend.com', 'google.com']) {
+    try {
+      const addrs = await new Promise<any[]>((resolve, reject) => {
+        dns.resolve4(host, (err, addresses) => err ? reject(err) : resolve(addresses));
+      });
+      results[`dns_${host}`] = { ok: true, addresses: addrs };
+    } catch (e: any) {
+      results[`dns_${host}`] = { ok: false, error: e.message };
+    }
+  }
+
+  // Test HTTP connectivity to OpenAI
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    const resp = await fetch('https://api.openai.com/v1/models', {
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${config.openai.apiKey}` },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    results['openai_api'] = { ok: resp.ok, status: resp.status };
+  } catch (e: any) {
+    results['openai_api'] = { ok: false, error: e.message, cause: e.cause?.message };
+  }
+
+  res.json({ success: true, data: results });
+});
+
 export default router;
