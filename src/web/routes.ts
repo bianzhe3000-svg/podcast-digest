@@ -637,7 +637,7 @@ router.get('/debug/network', async (_req: Request, res: Response) => {
     const chatResult = await client.chat.completions.create({
       model: config.openai.model,
       messages: [{ role: 'user', content: 'Say "ok" and nothing else.' }],
-      max_tokens: 5,
+      max_completion_tokens: 16,
     });
     const reply = chatResult.choices[0]?.message?.content || '';
     results['openai_sdk_chat'] = { ok: true, reply, model: (chatResult as any).model };
