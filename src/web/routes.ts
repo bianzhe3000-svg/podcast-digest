@@ -597,6 +597,7 @@ router.get('/settings', (_req: Request, res: Response) => {
 // === Network Diagnostics ===
 router.get('/debug/network', async (_req: Request, res: Response) => {
   const dns = await import('dns');
+  const OpenAI = (await import('openai')).default;
   const results: Record<string, any> = {};
 
   // Test DNS resolution
@@ -611,7 +612,7 @@ router.get('/debug/network', async (_req: Request, res: Response) => {
     }
   }
 
-  // Test HTTP connectivity to OpenAI
+  // Test HTTP connectivity to OpenAI (raw fetch)
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
@@ -621,10 +622,55 @@ router.get('/debug/network', async (_req: Request, res: Response) => {
       signal: controller.signal,
     });
     clearTimeout(timeout);
-    results['openai_api'] = { ok: resp.ok, status: resp.status };
+    results['openai_fetch'] = { ok: resp.ok, status: resp.status };
   } catch (e: any) {
-    results['openai_api'] = { ok: false, error: e.message, cause: e.cause?.message };
+    results['openai_fetch'] = { ok: false, error: e.message, cause: e.cause?.message };
   }
+
+  // Test OpenAI SDK Chat call (the actual path that fails)
+  try {
+    const client = new OpenAI({
+      apiKey: config.openai.apiKey,
+      baseURL: config.openai.baseUrl,
+      timeout: 30000,
+    });
+    const chatResult = await client.chat.completions.create({
+      model: config.openai.model,
+      messages: [{ role: 'user', content: 'Say "ok" and nothing else.' }],
+      max_tokens: 5,
+    });
+    const reply = chatResult.choices[0]?.message?.content || '';
+    results['openai_sdk_chat'] = { ok: true, reply, model: (chatResult as any).model };
+  } catch (e: any) {
+    results['openai_sdk_chat'] = {
+      ok: false,
+      error: e.message,
+      type: e.constructor?.name,
+      status: e.status,
+      cause: e.cause?.message,
+    };
+  }
+
+  // Test audio download (axios - same path as audio downloader)
+  try {
+    const axios = (await import('axios')).default;
+    const testResp = await axios({
+      method: 'get',
+      url: 'https://api.openai.com/v1/models',
+      timeout: 10000,
+      headers: { 'Authorization': `Bearer ${config.openai.apiKey}` },
+    });
+    results['axios_test'] = { ok: true, status: testResp.status };
+  } catch (e: any) {
+    results['axios_test'] = { ok: false, error: e.message, code: e.code };
+  }
+
+  // Show config info
+  results['config'] = {
+    baseUrl: config.openai.baseUrl,
+    model: config.openai.model,
+    apiKeyPrefix: config.openai.apiKey ? config.openai.apiKey.substring(0, 8) + '...' : 'MISSING',
+  };
 
   res.json({ success: true, data: results });
 });
