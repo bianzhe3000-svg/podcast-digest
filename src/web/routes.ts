@@ -789,4 +789,65 @@ router.get('/debug/network', async (_req: Request, res: Response) => {
   res.json({ success: true, data: results });
 });
 
+/**
+ * 诊断端点：测试从 Railway 服务器下载指定音频 URL
+ * GET /api/debug/test-download?url=xxx
+ */
+router.get('/debug/test-download', async (req: Request, res: Response) => {
+  const axios = (await import('axios')).default;
+  const testUrl = String(req.query.url || '');
+  if (!testUrl) {
+    res.json({ success: false, error: 'Missing url parameter' });
+    return;
+  }
+
+  const results: Record<string, any> = { originalUrl: testUrl };
+
+  // Step 1: 解析重定向
+  try {
+    const headResp = await axios.head(testUrl, {
+      maxRedirects: 10,
+      timeout: 15000,
+      headers: { 'User-Agent': 'PodcastDigest/2.0' },
+    });
+    const finalUrl = (headResp.request as any)?.res?.responseUrl || testUrl;
+    results.redirect = { ok: true, finalUrl, status: headResp.status, contentType: headResp.headers['content-type'] };
+  } catch (e: any) {
+    results.redirect = { ok: false, error: e.message, code: e.code, status: e.response?.status };
+    // 尝试 GET
+    try {
+      const getResp = await axios.get(testUrl, {
+        maxRedirects: 10, timeout: 15000,
+        headers: { 'User-Agent': 'PodcastDigest/2.0', 'Range': 'bytes=0-0' },
+        responseType: 'stream',
+      });
+      const finalUrl = (getResp.request as any)?.res?.responseUrl || testUrl;
+      getResp.data.destroy();
+      results.redirect_get = { ok: true, finalUrl, status: getResp.status };
+    } catch (e2: any) {
+      results.redirect_get = { ok: false, error: e2.message, code: e2.code, status: e2.response?.status };
+    }
+  }
+
+  // Step 2: 尝试下载前 1KB
+  try {
+    const dlResp = await axios.get(results.redirect?.finalUrl || testUrl, {
+      maxRedirects: 10, timeout: 15000,
+      headers: { 'User-Agent': 'PodcastDigest/2.0', 'Range': 'bytes=0-1023' },
+      responseType: 'arraybuffer',
+    });
+    results.download = {
+      ok: true,
+      status: dlResp.status,
+      bytesReceived: dlResp.data.byteLength,
+      contentType: dlResp.headers['content-type'],
+      contentLength: dlResp.headers['content-length'],
+    };
+  } catch (e: any) {
+    results.download = { ok: false, error: e.message, code: e.code, status: e.response?.status };
+  }
+
+  res.json({ success: true, data: results });
+});
+
 export default router;
