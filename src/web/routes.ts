@@ -328,6 +328,30 @@ router.post('/pipeline/run', (_req: Request, res: Response) => {
   }
 });
 
+// === Failed Episodes Info ===
+
+router.get('/pipeline/failed', (_req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const failedEpisodes = db.getFailedEpisodes();
+    res.json({
+      success: true,
+      data: {
+        count: failedEpisodes.length,
+        episodes: failedEpisodes.map(ep => ({
+          id: ep.id,
+          title: ep.title,
+          podcast: ep.podcast_name,
+          audioUrl: ep.audio_url?.substring(0, 100),
+          publishedAt: ep.published_at,
+        })),
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: (error as Error).message });
+  }
+});
+
 // === Retry Failed Episodes ===
 
 router.post('/pipeline/retry-failed', (_req: Request, res: Response) => {
