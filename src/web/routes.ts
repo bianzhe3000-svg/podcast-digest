@@ -352,6 +352,89 @@ router.get('/pipeline/failed', (_req: Request, res: Response) => {
   }
 });
 
+// === Process Pending Episodes (catch-up) ===
+
+router.get('/pipeline/pending', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const sinceHours = parseInt(String(req.query.hours || ''), 10) || 168; // 默认 7 天
+    const episodes = db.getPendingEpisodesSince(sinceHours);
+    res.json({
+      success: true,
+      data: {
+        count: episodes.length,
+        sinceHours,
+        episodes: episodes.slice(0, 50).map(ep => ({
+          id: ep.id,
+          title: ep.title,
+          podcast: ep.podcast_name,
+          publishedAt: ep.published_at,
+        })),
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: (error as Error).message });
+  }
+});
+
+router.post('/pipeline/process-pending', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const sinceHours = parseInt(String(req.query.hours || req.body?.hours || ''), 10) || 168;
+    const episodes = db.getPendingEpisodesSince(sinceHours);
+
+    if (episodes.length === 0) {
+      res.json({ success: true, data: { message: '没有待处理的剧集', count: 0 } });
+      return;
+    }
+
+    const taskLogId = db.createTaskLog('process_pending_catchup');
+    logger.info(`Starting catch-up processing: ${episodes.length} pending episodes from last ${sinceHours}h`);
+
+    res.json({
+      success: true,
+      data: { message: `开始补处理 ${episodes.length} 个剧集（过去 ${sinceHours} 小时）`, count: episodes.length, taskLogId },
+    });
+
+    // 后台逐集处理
+    (async () => {
+      const results: { status: string; title: string; error?: string }[] = [];
+      for (const ep of episodes) {
+        try {
+          const freshEp = db.getEpisodeById(ep.id);
+          if (!freshEp || freshEp.status !== 'pending') continue;
+          const result = await processEpisode(ep.podcast_name, freshEp);
+          results.push({ status: result.status, title: result.episodeTitle, error: result.error });
+          logger.info(`Catch-up result: ${result.episodeTitle} => ${result.status}`);
+        } catch (error) {
+          results.push({ status: 'failed', title: ep.title, error: (error as Error).message });
+          logger.error(`Catch-up failed: ${ep.title}`, { error: (error as Error).message });
+        }
+      }
+
+      const succeeded = results.filter(r => r.status === 'success').length;
+      const failed = results.filter(r => r.status === 'failed').length;
+
+      const failedDetails = results
+        .filter(r => r.status === 'failed' && r.error)
+        .map(r => `[${r.title}] ${r.error}`)
+        .join('\n');
+
+      db.updateTaskLog(taskLogId, {
+        status: failed > 0 && succeeded === 0 ? 'failed' : 'completed',
+        total_episodes: results.length,
+        processed_episodes: succeeded,
+        failed_episodes: failed,
+        error_details: failedDetails || undefined,
+      });
+
+      logger.info(`Catch-up completed: ${succeeded} ok, ${failed} failed out of ${results.length}`);
+    })();
+  } catch (error) {
+    res.status(500).json({ success: false, error: (error as Error).message });
+  }
+});
+
 // === Retry Failed Episodes ===
 
 router.post('/pipeline/retry-failed', (_req: Request, res: Response) => {

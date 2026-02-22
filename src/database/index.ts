@@ -250,6 +250,17 @@ class DatabaseManager {
     `).get(podcastName, `${publishedDate}%`) as any;
   }
 
+  /** 获取指定时间范围内 pending 状态的剧集（带播客名） */
+  getPendingEpisodesSince(sinceHours: number): (Episode & { podcast_name: string })[] {
+    return this.db.prepare(`
+      SELECT e.*, p.name as podcast_name FROM episodes e
+      JOIN podcasts p ON e.podcast_id = p.id
+      WHERE e.status = 'pending' AND e.audio_url IS NOT NULL
+      AND e.published_at >= datetime('now', ?)
+      ORDER BY e.published_at DESC
+    `).all(`-${sinceHours} hours`) as (Episode & { podcast_name: string })[];
+  }
+
   /** 获取所有失败的剧集（带播客名） */
   getFailedEpisodes(): (Episode & { podcast_name: string })[] {
     return this.db.prepare(`
