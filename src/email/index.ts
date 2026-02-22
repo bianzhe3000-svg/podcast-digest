@@ -128,9 +128,33 @@ function nl2br(text: string): string {
 }
 
 /**
+ * 按播客名分组并排序剧集（播客名字母序，组内按发布时间降序）
+ * 返回扁平的排序后数组，邮件和 PDF 共用同一排序
+ */
+function sortEpisodesByPodcast(episodes: DigestEpisode[]): DigestEpisode[] {
+  const grouped = new Map<string, DigestEpisode[]>();
+  for (const ep of episodes) {
+    const key = ep.podcast.name;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key)!.push(ep);
+  }
+  // 播客名字母序
+  const sortedKeys = [...grouped.keys()].sort((a, b) => a.localeCompare(b));
+  const sorted: DigestEpisode[] = [];
+  for (const key of sortedKeys) {
+    const eps = grouped.get(key)!;
+    // 组内按发布时间降序
+    eps.sort((a, b) => (b.episode.published_at || '').localeCompare(a.episode.published_at || ''));
+    sorted.push(...eps);
+  }
+  return sorted;
+}
+
+/**
  * Build full HTML email with all 4 sections per episode
  */
 function buildDigestHtml(episodes: DigestEpisode[], dateStr: string): string {
+  // episodes 已经在外部统一排好序
   const episodesByPodcast = new Map<string, DigestEpisode[]>();
   for (const ep of episodes) {
     const key = ep.podcast.name;
@@ -339,19 +363,22 @@ export async function sendDailyDigest(sinceHours: number = 24): Promise<{
   }
 
   try {
-    const episodes = getRecentCompletedEpisodes(sinceHours);
+    const rawEpisodes = getRecentCompletedEpisodes(sinceHours);
 
-    if (episodes.length === 0) {
+    if (rawEpisodes.length === 0) {
       logger.info('Email digest skipped: no new episodes in the last ' + sinceHours + ' hours');
       return { sent: false, episodeCount: 0, error: 'No new episodes' };
     }
+
+    // 统一排序：播客名字母序 > 组内发布时间降序，邮件和 PDF 共用同一顺序
+    const episodes = sortEpisodesByPodcast(rawEpisodes);
 
     const dateStr = dayjs().tz('Asia/Shanghai').format('YYYY年MM月DD日');
     const html = buildDigestHtml(episodes, dateStr);
     const subject = `🎧 Podcast Digest - ${dateStr} (${episodes.length}篇新内容)`;
     const from = config.email.fromAddress || config.email.smtpUser || 'Podcast Digest <onboarding@resend.dev>';
 
-    // Generate single digest PDF containing all episodes
+    // Generate single digest PDF containing all episodes (same order as email HTML)
     const attachments: EmailAttachment[] = [];
     try {
       const pdfEpisodes: PdfEpisodeData[] = episodes.map(ep => {

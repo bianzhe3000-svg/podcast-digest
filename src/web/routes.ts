@@ -383,17 +383,8 @@ router.post('/pipeline/retry-failed', (_req: Request, res: Response) => {
       });
 
       logger.info(`Retry completed: ${succeeded} ok, ${failed} failed out of ${results.length}`);
-
-      // 处理完成后立即发送邮件摘要（覆盖范围=最近48小时，确保今天重处理的都能被包含）
-      if (succeeded > 0) {
-        try {
-          logger.info('Sending email digest after retry...');
-          const emailResult = await sendDailyDigest(48);
-          logger.info('Post-retry email sent', emailResult);
-        } catch (emailError) {
-          logger.error('Post-retry email failed', { error: (emailError as Error).message });
-        }
-      }
+      // 不再自动发邮件，避免与每天 8:00 定时邮件重复
+      // 如需立即发送，请手动调用 POST /api/email/send-digest
     })();
   } catch (error) {
     res.status(500).json({ success: false, error: (error as Error).message });
@@ -563,9 +554,11 @@ router.post('/email/test-connection', async (_req: Request, res: Response) => {
   }
 });
 
-router.post('/email/send-digest', async (_req: Request, res: Response) => {
+router.post('/email/send-digest', async (req: Request, res: Response) => {
   try {
-    const result = await sendDailyDigest(24);
+    // 支持自定义时间窗口，默认24小时
+    const sinceHours = parseInt(String(req.query.hours || req.body?.hours || ''), 10) || 24;
+    const result = await sendDailyDigest(sinceHours);
     res.json({ success: true, data: result });
   } catch (error) {
     res.status(500).json({ success: false, error: (error as Error).message });
