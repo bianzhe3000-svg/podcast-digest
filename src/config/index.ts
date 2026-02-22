@@ -36,7 +36,7 @@ export const config = {
     apiKey: env('DASHSCOPE_API_KEY', ''),
     baseUrl: env('DASHSCOPE_BASE_URL', 'https://dashscope.aliyuncs.com'),
     speechModel: env('DASHSCOPE_SPEECH_MODEL', 'paraformer-v2'),
-    textModel: env('DASHSCOPE_TEXT_MODEL', 'qwen-plus'),
+    textModel: env('DASHSCOPE_TEXT_MODEL', 'qwen3.5-plus'),
   },
 
   database: {
