@@ -58,6 +58,59 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * 解析重定向链接，获取最终的真实 URL
+ * 很多播客音频 URL 经过 podtrac/chartable 等追踪服务多次 302 重定向
+ * Paraformer 可能无法跟随这些重定向，所以先解析出最终 URL
+ */
+async function resolveRedirects(url: string): Promise<string> {
+  try {
+    const response = await axios.head(url, {
+      maxRedirects: 10,
+      timeout: 15000,
+      headers: {
+        'User-Agent': 'PodcastDigest/2.0',
+      },
+      // axios 默认会跟随重定向，最终 response.request.res.responseUrl 就是最终 URL
+    });
+
+    // axios 跟随重定向后，最终 URL 在 response.request.res.responseUrl
+    const finalUrl = (response.request as any)?.res?.responseUrl || url;
+
+    if (finalUrl !== url) {
+      logger.info('Resolved redirect URL', {
+        original: url.substring(0, 80),
+        final: finalUrl.substring(0, 120),
+      });
+    }
+
+    return finalUrl;
+  } catch (error) {
+    // HEAD 请求失败时，尝试 GET 请求（某些 CDN 不支持 HEAD）
+    try {
+      const response = await axios.get(url, {
+        maxRedirects: 10,
+        timeout: 15000,
+        headers: { 'User-Agent': 'PodcastDigest/2.0', 'Range': 'bytes=0-0' },
+        responseType: 'stream',
+      });
+      const finalUrl = (response.request as any)?.res?.responseUrl || url;
+      // 关闭流
+      response.data.destroy();
+      if (finalUrl !== url) {
+        logger.info('Resolved redirect URL (via GET)', {
+          original: url.substring(0, 80),
+          final: finalUrl.substring(0, 120),
+        });
+      }
+      return finalUrl;
+    } catch {
+      logger.warn('Failed to resolve redirects, using original URL', { url: url.substring(0, 80) });
+      return url;
+    }
+  }
+}
+
+/**
  * 使用阿里云百炼 Paraformer 进行录音文件转录
  * 直接传入播客音频 URL，无需下载/压缩/分割
  */
@@ -67,8 +120,11 @@ export async function transcribeWithParaformer(audioUrl: string): Promise<Transc
     throw new Error('DASHSCOPE_API_KEY is not configured');
   }
 
+  // 解析重定向链接（podtrac/chartable/swap.fm 等追踪服务）
+  const resolvedUrl = await resolveRedirects(audioUrl);
+
   const model = config.dashscope.speechModel;
-  logger.info('Submitting Paraformer transcription task', { audioUrl: audioUrl.substring(0, 120), model });
+  logger.info('Submitting Paraformer transcription task', { audioUrl: resolvedUrl.substring(0, 120), model });
 
   // Step 1: 提交异步转录任务
   const submitResponse = await axios.post<ParaformerSubmitResponse>(
@@ -76,7 +132,7 @@ export async function transcribeWithParaformer(audioUrl: string): Promise<Transc
     {
       model,
       input: {
-        file_urls: [audioUrl],
+        file_urls: [resolvedUrl],
       },
       parameters: {
         language_hints: ['zh', 'en'],
