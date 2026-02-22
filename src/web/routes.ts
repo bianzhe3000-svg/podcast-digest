@@ -342,7 +342,7 @@ router.get('/pipeline/failed', (_req: Request, res: Response) => {
           id: ep.id,
           title: ep.title,
           podcast: ep.podcast_name,
-          audioUrl: ep.audio_url?.substring(0, 100),
+          audioUrl: ep.audio_url,
           publishedAt: ep.published_at,
         })),
       },
