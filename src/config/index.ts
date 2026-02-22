@@ -22,8 +22,8 @@ function envBool(key: string, defaultValue: boolean): boolean {
 }
 
 export const config = {
-  transcriptionProvider: env('TRANSCRIPTION_PROVIDER', 'openai') as ProviderType,
-  analysisProvider: env('ANALYSIS_PROVIDER', 'openai') as ProviderType,
+  transcriptionProvider: env('TRANSCRIPTION_PROVIDER', 'dashscope') as ProviderType,
+  analysisProvider: env('ANALYSIS_PROVIDER', 'dashscope') as ProviderType,
 
   openai: {
     apiKey: env('OPENAI_API_KEY', ''),
@@ -34,8 +34,9 @@ export const config = {
 
   dashscope: {
     apiKey: env('DASHSCOPE_API_KEY', ''),
+    baseUrl: env('DASHSCOPE_BASE_URL', 'https://dashscope.aliyuncs.com'),
     speechModel: env('DASHSCOPE_SPEECH_MODEL', 'paraformer-v2'),
-    textModel: env('DASHSCOPE_TEXT_MODEL', 'qwen-turbo'),
+    textModel: env('DASHSCOPE_TEXT_MODEL', 'qwen-plus'),
   },
 
   database: {

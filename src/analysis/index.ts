@@ -48,9 +48,12 @@ const SINGLE_ANALYSIS_MAX_CHARS = 10000;
 // 分段时每段的最大字符数（8000 字符 ≈ 1.2-1.6 万 token，兼容各种模型和代理）
 const CHUNK_MAX_CHARS = 8000;
 
-let openaiClient: OpenAI | null = null;
+// --- 客户端管理 ---
 
-function getClient(): OpenAI {
+let openaiClient: OpenAI | null = null;
+let dashscopeClient: OpenAI | null = null;
+
+function getOpenAIClient(): OpenAI {
   if (!openaiClient) {
     openaiClient = new OpenAI({
       apiKey: config.openai.apiKey,
@@ -61,43 +64,65 @@ function getClient(): OpenAI {
   return openaiClient;
 }
 
+function getDashScopeClient(): OpenAI {
+  if (!dashscopeClient) {
+    dashscopeClient = new OpenAI({
+      apiKey: config.dashscope.apiKey,
+      baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      timeout: 300000,
+    });
+  }
+  return dashscopeClient;
+}
+
+/** 根据当前 provider 获取 client 和 model */
+function getClientAndModel(): { client: OpenAI; model: string } {
+  if (config.analysisProvider === 'dashscope') {
+    return { client: getDashScopeClient(), model: config.dashscope.textModel };
+  }
+  return { client: getOpenAIClient(), model: config.openai.model };
+}
+
+// --- 主入口 ---
+
 export async function analyzeContent(
   transcript: string,
   episodeTitle: string,
   podcastName: string
 ): Promise<AnalysisOutput> {
+  const { client, model } = getClientAndModel();
+
   logger.info('Starting content analysis', {
     provider: config.analysisProvider,
+    model,
     textLength: transcript.length,
     title: episodeTitle,
   });
 
-  if (config.analysisProvider === 'openai') {
-    // 短文本：直接单次分析
-    if (transcript.length <= SINGLE_ANALYSIS_MAX_CHARS) {
-      logger.info('Using single-pass analysis', { textLength: transcript.length });
-      return analyzeWithOpenAI(transcript, episodeTitle, podcastName);
-    }
-    // 长文本：分段摘要 + 合并分析
-    const estimatedChunks = Math.ceil(transcript.length / CHUNK_MAX_CHARS);
-    logger.info('Using chunked analysis for long transcript', {
-      textLength: transcript.length,
-      estimatedChunks,
-    });
-    return analyzeWithChunks(transcript, episodeTitle, podcastName);
+  // 短文本：直接单次分析
+  if (transcript.length <= SINGLE_ANALYSIS_MAX_CHARS) {
+    logger.info('Using single-pass analysis', { textLength: transcript.length });
+    return singlePassAnalysis(client, model, transcript, episodeTitle, podcastName);
   }
 
-  throw new Error(`Unsupported analysis provider: ${config.analysisProvider}`);
+  // 长文本：分段摘要 + 合并分析
+  const estimatedChunks = Math.ceil(transcript.length / CHUNK_MAX_CHARS);
+  logger.info('Using chunked analysis for long transcript', {
+    textLength: transcript.length,
+    estimatedChunks,
+  });
+  return chunkedAnalysis(client, model, transcript, episodeTitle, podcastName);
 }
 
-/** 单次直接分析（短文本） */
-async function analyzeWithOpenAI(
+// --- 单次直接分析（短文本） ---
+
+async function singlePassAnalysis(
+  client: OpenAI,
+  model: string,
   transcript: string,
   episodeTitle: string,
   podcastName: string
 ): Promise<AnalysisOutput> {
-  const client = getClient();
-
   const userPrompt = buildAnalysisPrompt(transcript, episodeTitle, podcastName, {
     summaryMinLength: config.analysis.summaryMinLength,
     summaryMaxLength: config.analysis.summaryMaxLength,
@@ -107,7 +132,7 @@ async function analyzeWithOpenAI(
   const response = await withRetry(
     async () => {
       const result = await client.chat.completions.create({
-        model: config.openai.model,
+        model,
         messages: [
           { role: 'system', content: ANALYSIS_SYSTEM_PROMPT },
           { role: 'user', content: userPrompt },
@@ -119,7 +144,7 @@ async function analyzeWithOpenAI(
 
       const content = result.choices[0]?.message?.content;
       const finishReason = result.choices[0]?.finish_reason;
-      logger.info('Single-pass API response', { finishReason, contentLength: content?.length || 0 });
+      logger.info('Single-pass API response', { finishReason, contentLength: content?.length || 0, model: (result as any).model });
 
       if (!content || content.length < 10) {
         throw new Error(`Empty or too short response from API (finish_reason: ${finishReason}, length: ${content?.length || 0})`);
@@ -133,13 +158,15 @@ async function analyzeWithOpenAI(
   return normalizeAnalysisResult(content);
 }
 
-/** 分段分析（长文本）：先对每段提取摘要，再合并生成最终分析 */
-async function analyzeWithChunks(
+// --- 分段分析（长文本）---
+
+async function chunkedAnalysis(
+  client: OpenAI,
+  model: string,
   transcript: string,
   episodeTitle: string,
   podcastName: string
 ): Promise<AnalysisOutput> {
-  const client = getClient();
   const chunks = splitIntoChunks(transcript, CHUNK_MAX_CHARS);
   logger.info(`Split transcript into ${chunks.length} chunks`, {
     chunkSizes: chunks.map(c => c.length),
@@ -159,7 +186,7 @@ async function analyzeWithChunks(
     const response = await withRetry(
       async () => {
         const result = await client.chat.completions.create({
-          model: config.openai.model,
+          model,
           messages: [
             { role: 'system', content: ANALYSIS_SYSTEM_PROMPT },
             { role: 'user', content: chunkPrompt },
@@ -170,18 +197,15 @@ async function analyzeWithChunks(
 
         const content = result.choices?.[0]?.message?.content;
         const finishReason = result.choices?.[0]?.finish_reason;
-        const choicesCount = result.choices?.length || 0;
         const usageInfo = (result as any).usage;
         logger.info(`Chunk ${i + 1} API response`, {
           finishReason,
-          choicesCount,
           contentLength: content?.length || 0,
           contentPreview: content?.substring(0, 200) || '(empty)',
           usage: usageInfo ? JSON.stringify(usageInfo) : 'N/A',
           model: (result as any).model || 'unknown',
         });
 
-        // 如果返回空内容，抛错触发重试
         if (!content || content.trim().length < 50) {
           logger.error(`Chunk ${i + 1} empty response debug`, {
             fullResponse: JSON.stringify(result).substring(0, 1000),
@@ -225,7 +249,7 @@ async function analyzeWithChunks(
   const finalResponse = await withRetry(
     async () => {
       const result = await client.chat.completions.create({
-        model: config.openai.model,
+        model,
         messages: [
           { role: 'system', content: ANALYSIS_SYSTEM_PROMPT },
           { role: 'user', content: mergePrompt },
@@ -250,6 +274,8 @@ async function analyzeWithChunks(
   const content = finalResponse.choices[0]?.message?.content || '{}';
   return normalizeAnalysisResult(content);
 }
+
+// --- 工具函数 ---
 
 /** 按段落边界将文本分成多个 chunk */
 function splitIntoChunks(text: string, maxChars: number): string[] {

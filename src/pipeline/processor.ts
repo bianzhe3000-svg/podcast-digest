@@ -50,17 +50,27 @@ export async function processEpisode(
   logger.info(`Processing episode: ${episode.title}`, { episodeId: episode.id });
 
   let audioPath: string | null = null;
+  const useDashScopeTranscription = config.transcriptionProvider === 'dashscope';
 
   try {
-    // Step 1: Download audio
-    logger.info('Step 1/4: Downloading audio');
-    audioPath = await downloadAudio(episode.audio_url, config.storage.tempDir);
-    logMemory('after download');
+    let transcription: { text: string; language: string; duration?: number };
 
-    // Step 2: Transcribe
-    logger.info('Step 2/4: Transcribing audio');
-    const transcription = await transcribeAudio(audioPath);
-    logMemory('after transcription');
+    if (useDashScopeTranscription) {
+      // DashScope Paraformer: 直接传 URL，跳过下载/压缩/分割
+      logger.info('Step 1/4: Skipping download (DashScope uses URL directly)');
+      logger.info('Step 2/4: Transcribing audio via Paraformer');
+      transcription = await transcribeAudio('', episode.audio_url);
+      logMemory('after transcription');
+    } else {
+      // OpenAI Whisper: 需要先下载再转录
+      logger.info('Step 1/4: Downloading audio');
+      audioPath = await downloadAudio(episode.audio_url, config.storage.tempDir);
+      logMemory('after download');
+
+      logger.info('Step 2/4: Transcribing audio via Whisper');
+      transcription = await transcribeAudio(audioPath);
+      logMemory('after transcription');
+    }
 
     if (!transcription.text || transcription.text.length < 50) {
       throw new Error('Transcription result too short or empty');

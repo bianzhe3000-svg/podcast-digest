@@ -574,6 +574,8 @@ router.get('/settings', (_req: Request, res: Response) => {
       transcriptionProvider: config.transcriptionProvider,
       analysisProvider: config.analysisProvider,
       openaiModel: config.openai.model,
+      dashscopeSpeechModel: config.dashscope.speechModel,
+      dashscopeTextModel: config.dashscope.textModel,
       schedulerCron: config.scheduler.cron,
       schedulerTimezone: config.scheduler.timezone,
       maxConcurrentFeeds: config.processing.maxConcurrentFeeds,
@@ -593,8 +595,9 @@ router.get('/debug/network', async (_req: Request, res: Response) => {
   const OpenAI = (await import('openai')).default;
   const results: Record<string, any> = {};
 
-  // Test DNS resolution
-  for (const host of ['api.openai.com', 'resend.com', 'google.com']) {
+  // DNS resolution for relevant hosts
+  const dnsHosts = ['dashscope.aliyuncs.com', 'api.openai.com', 'resend.com', 'google.com'];
+  for (const host of dnsHosts) {
     try {
       const addrs = await new Promise<any[]>((resolve, reject) => {
         dns.resolve4(host, (err, addresses) => err ? reject(err) : resolve(addresses));
@@ -605,64 +608,75 @@ router.get('/debug/network', async (_req: Request, res: Response) => {
     }
   }
 
-  // Test HTTP connectivity to OpenAI (raw fetch)
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
-    const resp = await fetch('https://api.openai.com/v1/models', {
-      method: 'GET',
-      headers: { 'Authorization': `Bearer ${config.openai.apiKey}` },
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    results['openai_fetch'] = { ok: resp.ok, status: resp.status };
-  } catch (e: any) {
-    results['openai_fetch'] = { ok: false, error: e.message, cause: e.cause?.message };
+  // Test DashScope Chat API (Qwen via OpenAI-compatible endpoint)
+  if (config.dashscope.apiKey) {
+    try {
+      const dsClient = new OpenAI({
+        apiKey: config.dashscope.apiKey,
+        baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        timeout: 30000,
+      });
+      const chatResult = await dsClient.chat.completions.create({
+        model: config.dashscope.textModel,
+        messages: [{ role: 'user', content: 'Say "ok" and nothing else.' }],
+        max_tokens: 16,
+      });
+      const reply = chatResult.choices[0]?.message?.content || '';
+      results['dashscope_chat'] = { ok: true, reply, model: (chatResult as any).model };
+    } catch (e: any) {
+      results['dashscope_chat'] = {
+        ok: false,
+        error: e.message,
+        type: e.constructor?.name,
+        status: e.status,
+      };
+    }
+  } else {
+    results['dashscope_chat'] = { ok: false, error: 'DASHSCOPE_API_KEY not configured' };
   }
 
-  // Test OpenAI SDK Chat call (the actual path that fails)
-  try {
-    const client = new OpenAI({
-      apiKey: config.openai.apiKey,
-      baseURL: config.openai.baseUrl,
-      timeout: 30000,
-    });
-    const chatResult = await client.chat.completions.create({
-      model: config.openai.model,
-      messages: [{ role: 'user', content: 'Say "ok" and nothing else.' }],
-      max_completion_tokens: 16,
-    });
-    const reply = chatResult.choices[0]?.message?.content || '';
-    results['openai_sdk_chat'] = { ok: true, reply, model: (chatResult as any).model };
-  } catch (e: any) {
-    results['openai_sdk_chat'] = {
-      ok: false,
-      error: e.message,
-      type: e.constructor?.name,
-      status: e.status,
-      cause: e.cause?.message,
-    };
-  }
-
-  // Test audio download (axios - same path as audio downloader)
-  try {
-    const axios = (await import('axios')).default;
-    const testResp = await axios({
-      method: 'get',
-      url: 'https://api.openai.com/v1/models',
-      timeout: 10000,
-      headers: { 'Authorization': `Bearer ${config.openai.apiKey}` },
-    });
-    results['axios_test'] = { ok: true, status: testResp.status };
-  } catch (e: any) {
-    results['axios_test'] = { ok: false, error: e.message, code: e.code };
+  // Test OpenAI SDK Chat call (if configured)
+  if (config.openai.apiKey) {
+    try {
+      const client = new OpenAI({
+        apiKey: config.openai.apiKey,
+        baseURL: config.openai.baseUrl,
+        timeout: 30000,
+      });
+      const chatResult = await client.chat.completions.create({
+        model: config.openai.model,
+        messages: [{ role: 'user', content: 'Say "ok" and nothing else.' }],
+        max_completion_tokens: 16,
+      });
+      const reply = chatResult.choices[0]?.message?.content || '';
+      results['openai_sdk_chat'] = { ok: true, reply, model: (chatResult as any).model };
+    } catch (e: any) {
+      results['openai_sdk_chat'] = {
+        ok: false,
+        error: e.message,
+        type: e.constructor?.name,
+        status: e.status,
+        cause: e.cause?.message,
+      };
+    }
+  } else {
+    results['openai_sdk_chat'] = { skipped: true, reason: 'OPENAI_API_KEY not configured' };
   }
 
   // Show config info
   results['config'] = {
-    baseUrl: config.openai.baseUrl,
-    model: config.openai.model,
-    apiKeyPrefix: config.openai.apiKey ? config.openai.apiKey.substring(0, 8) + '...' : 'MISSING',
+    transcriptionProvider: config.transcriptionProvider,
+    analysisProvider: config.analysisProvider,
+    dashscope: {
+      speechModel: config.dashscope.speechModel,
+      textModel: config.dashscope.textModel,
+      apiKeyPrefix: config.dashscope.apiKey ? config.dashscope.apiKey.substring(0, 8) + '...' : 'MISSING',
+    },
+    openai: {
+      baseUrl: config.openai.baseUrl,
+      model: config.openai.model,
+      apiKeyPrefix: config.openai.apiKey ? config.openai.apiKey.substring(0, 8) + '...' : 'NOT SET',
+    },
   };
 
   res.json({ success: true, data: results });
