@@ -1,10 +1,14 @@
 import axios from 'axios';
+import fs from 'fs';
+import path from 'path';
+import FormData from 'form-data';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { TranscriptionResult } from './whisper';
 
 const DASHSCOPE_ASR_URL = 'https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription';
 const DASHSCOPE_TASK_URL = 'https://dashscope.aliyuncs.com/api/v1/tasks';
+const DASHSCOPE_UPLOAD_POLICY_URL = 'https://dashscope.aliyuncs.com/api/v1/uploads';
 
 // 轮询配置
 const POLL_INITIAL_INTERVAL_MS = 10000; // 前 5 次每 10 秒
@@ -111,51 +115,120 @@ async function resolveRedirects(url: string): Promise<string> {
 }
 
 /**
- * 使用阿里云百炼 Paraformer 进行录音文件转录
- * 直接传入播客音频 URL，无需下载/压缩/分割
+ * 下载音频文件到本地，然后上传到 DashScope OSS 获取 oss:// URL
  */
-export async function transcribeWithParaformer(audioUrl: string): Promise<TranscriptionResult> {
-  const apiKey = config.dashscope.apiKey;
-  if (!apiKey) {
-    throw new Error('DASHSCOPE_API_KEY is not configured');
+async function downloadAndUploadToDashScope(audioUrl: string, apiKey: string): Promise<string> {
+  const tempDir = config.storage.tempDir;
+  if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir, { recursive: true });
+  }
+  const tempPath = path.join(tempDir, `upload_${Date.now()}.mp3`);
+
+  try {
+    // Step 1: 下载音频到本地
+    logger.info('Downloading audio for DashScope upload', { url: audioUrl.substring(0, 100) });
+    const downloadResponse = await axios({
+      method: 'get',
+      url: audioUrl,
+      responseType: 'stream',
+      timeout: config.processing.audioDownloadTimeout,
+      maxRedirects: 10,
+      headers: { 'User-Agent': 'PodcastDigest/2.0' },
+    });
+
+    const writer = fs.createWriteStream(tempPath);
+    downloadResponse.data.pipe(writer);
+    await new Promise<void>((resolve, reject) => {
+      writer.on('finish', resolve);
+      writer.on('error', reject);
+      downloadResponse.data.on('error', reject);
+    });
+
+    const fileSize = fs.statSync(tempPath).size;
+    logger.info('Audio downloaded for upload', { sizeMB: (fileSize / 1024 / 1024).toFixed(1) });
+
+    // Step 2: 获取 DashScope 上传凭证
+    logger.info('Getting DashScope upload policy');
+    const policyResponse = await axios.get(DASHSCOPE_UPLOAD_POLICY_URL, {
+      params: { action: 'getPolicy', model: config.dashscope.speechModel },
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+      timeout: 15000,
+    });
+
+    const policy = policyResponse.data?.data;
+    if (!policy?.policy || !policy?.signature || !policy?.upload_host || !policy?.upload_dir) {
+      throw new Error(`Failed to get upload policy: ${JSON.stringify(policyResponse.data).substring(0, 300)}`);
+    }
+
+    // Step 3: 上传文件到 OSS
+    const filename = path.basename(tempPath);
+    const ossKey = `${policy.upload_dir}/${filename}`;
+
+    const form = new FormData();
+    form.append('OSSAccessKeyId', policy.oss_access_key_id);
+    form.append('Signature', policy.signature);
+    form.append('policy', policy.policy);
+    form.append('key', ossKey);
+    form.append('x-oss-object-acl', 'private');
+    form.append('x-oss-forbid-overwrite', 'true');
+    form.append('success_action_status', '200');
+    form.append('file', fs.createReadStream(tempPath));
+
+    logger.info('Uploading audio to DashScope OSS', { ossKey });
+    await axios.post(policy.upload_host, form, {
+      headers: form.getHeaders(),
+      timeout: 300000,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+    });
+
+    const ossUrl = `oss://${ossKey}`;
+    logger.info('Audio uploaded to DashScope OSS', { ossUrl });
+    return ossUrl;
+  } finally {
+    // 清理临时文件
+    if (fs.existsSync(tempPath)) {
+      try { fs.unlinkSync(tempPath); } catch {}
+    }
+  }
+}
+
+/**
+ * 提交 Paraformer 转录任务并轮询结果
+ */
+async function submitAndPollParaformer(
+  fileUrl: string,
+  apiKey: string,
+  model: string,
+  useOssResolve: boolean = false
+): Promise<TranscriptionResult> {
+  const headers: Record<string, string> = {
+    'Authorization': `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+    'X-DashScope-Async': 'enable',
+  };
+  if (useOssResolve) {
+    headers['X-DashScope-OssResourceResolve'] = 'enable';
   }
 
-  // 解析重定向链接（podtrac/chartable/swap.fm 等追踪服务）
-  const resolvedUrl = await resolveRedirects(audioUrl);
-
-  const model = config.dashscope.speechModel;
-  logger.info('Submitting Paraformer transcription task', { audioUrl: resolvedUrl.substring(0, 120), model });
-
-  // Step 1: 提交异步转录任务
   const submitResponse = await axios.post<ParaformerSubmitResponse>(
     DASHSCOPE_ASR_URL,
     {
       model,
-      input: {
-        file_urls: [resolvedUrl],
-      },
-      parameters: {
-        language_hints: ['zh', 'en'],
-      },
+      input: { file_urls: [fileUrl] },
+      parameters: { language_hints: ['zh', 'en'] },
     },
-    {
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'X-DashScope-Async': 'enable',
-      },
-      timeout: 30000,
-    }
+    { headers, timeout: 30000 }
   );
 
   const taskId = submitResponse.data?.output?.task_id;
   if (!taskId) {
-    throw new Error(`Paraformer submit failed: no task_id in response. Response: ${JSON.stringify(submitResponse.data).substring(0, 500)}`);
+    throw new Error(`Paraformer submit failed: no task_id. Response: ${JSON.stringify(submitResponse.data).substring(0, 500)}`);
   }
 
-  logger.info('Paraformer task submitted', { taskId, status: submitResponse.data.output.task_status });
+  logger.info('Paraformer task submitted', { taskId, status: submitResponse.data.output.task_status, fileUrl: fileUrl.substring(0, 80) });
 
-  // Step 2: 轮询任务状态
+  // 轮询任务状态
   const startTime = Date.now();
   let pollCount = 0;
 
@@ -165,7 +238,6 @@ export async function transcribeWithParaformer(audioUrl: string): Promise<Transc
       throw new Error(`Paraformer task timed out after ${Math.round(elapsed / 60000)} minutes (taskId: ${taskId})`);
     }
 
-    // 动态轮询间隔
     const interval = pollCount < POLL_INITIAL_COUNT ? POLL_INITIAL_INTERVAL_MS : POLL_LATER_INTERVAL_MS;
     await sleep(interval);
     pollCount++;
@@ -173,12 +245,7 @@ export async function transcribeWithParaformer(audioUrl: string): Promise<Transc
     try {
       const taskResponse = await axios.get<ParaformerTaskResponse>(
         `${DASHSCOPE_TASK_URL}/${taskId}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${apiKey}`,
-          },
-          timeout: 15000,
-        }
+        { headers: { 'Authorization': `Bearer ${apiKey}` }, timeout: 15000 }
       );
 
       const status = taskResponse.data?.output?.task_status;
@@ -193,19 +260,53 @@ export async function transcribeWithParaformer(audioUrl: string): Promise<Transc
         const code = taskResponse.data?.output?.code || '';
         throw new Error(`Paraformer task failed: ${code} ${msg} (taskId: ${taskId})`);
       }
-
-      // PENDING or RUNNING - continue polling
     } catch (error) {
       if ((error as Error).message.includes('Paraformer task failed')) {
         throw error;
       }
-      // 网络临时错误，继续轮询
-      logger.warn(`Paraformer poll error (will retry)`, {
-        taskId,
-        error: (error as Error).message,
-        pollCount,
-      });
+      logger.warn(`Paraformer poll error (will retry)`, { taskId, error: (error as Error).message, pollCount });
     }
+  }
+}
+
+/**
+ * 使用阿里云百炼 Paraformer 进行录音文件转录
+ * 1. 先尝试直接传 URL
+ * 2. 如果 Paraformer 无法下载（FILE_DOWNLOAD_FAILED/FILE_403_FORBIDDEN），
+ *    自动回退到下载→上传 DashScope OSS→用 oss:// URL 重新提交
+ */
+export async function transcribeWithParaformer(audioUrl: string): Promise<TranscriptionResult> {
+  const apiKey = config.dashscope.apiKey;
+  if (!apiKey) {
+    throw new Error('DASHSCOPE_API_KEY is not configured');
+  }
+
+  // 解析重定向链接（podtrac/chartable/swap.fm 等追踪服务）
+  const resolvedUrl = await resolveRedirects(audioUrl);
+  const model = config.dashscope.speechModel;
+
+  logger.info('Submitting Paraformer transcription task', { audioUrl: resolvedUrl.substring(0, 120), model });
+
+  try {
+    // 第一次尝试：直接传 URL
+    return await submitAndPollParaformer(resolvedUrl, apiKey, model);
+  } catch (error) {
+    const errMsg = (error as Error).message;
+
+    // 判断是否是文件下载失败错误
+    if (errMsg.includes('FILE_DOWNLOAD_FAILED') || errMsg.includes('FILE_403_FORBIDDEN')) {
+      logger.warn('Paraformer cannot download audio URL, falling back to upload mode', {
+        originalUrl: audioUrl.substring(0, 80),
+        error: errMsg,
+      });
+
+      // 回退：下载到本地 → 上传 DashScope OSS → 用 oss:// URL 重试
+      const ossUrl = await downloadAndUploadToDashScope(audioUrl, apiKey);
+      return await submitAndPollParaformer(ossUrl, apiKey, model, true);
+    }
+
+    // 其他错误直接抛出
+    throw error;
   }
 }
 
