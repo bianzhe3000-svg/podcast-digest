@@ -131,7 +131,7 @@ async function downloadAndUploadToDashScope(audioUrl: string, apiKey: string): P
       method: 'get',
       url: audioUrl,
       responseType: 'stream',
-      timeout: config.processing.audioDownloadTimeout,
+      timeout: Math.max(config.processing.audioDownloadTimeout, 600000), // 至少 10 分钟
       maxRedirects: 10,
       headers: { 'User-Agent': 'PodcastDigest/2.0' },
     });
@@ -177,7 +177,7 @@ async function downloadAndUploadToDashScope(audioUrl: string, apiKey: string): P
     logger.info('Uploading audio to DashScope OSS', { ossKey });
     await axios.post(policy.upload_host, form, {
       headers: form.getHeaders(),
-      timeout: 300000,
+      timeout: 600000, // 10 分钟，大音频文件上传需要更多时间
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
     });
