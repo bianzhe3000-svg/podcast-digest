@@ -48,6 +48,14 @@ const SINGLE_ANALYSIS_MAX_CHARS = 10000;
 // 分段时每段的最大字符数（8000 字符 ≈ 1.2-1.6 万 token，兼容各种模型和代理）
 const CHUNK_MAX_CHARS = 8000;
 
+/** 根据 provider 构建 max tokens 参数（DashScope 只认 max_tokens，OpenAI 用 max_completion_tokens） */
+function buildMaxTokensParam(maxTokens: number): Record<string, number> {
+  if (config.analysisProvider === 'dashscope') {
+    return { max_tokens: maxTokens };
+  }
+  return { max_completion_tokens: maxTokens };
+}
+
 // --- 客户端管理 ---
 
 let openaiClient: OpenAI | null = null;
@@ -129,7 +137,7 @@ async function singlePassAnalysis(
     keyPointsCount: config.analysis.keyPointsCount,
   });
 
-  const response = await withRetry(
+  return await withRetry(
     async () => {
       const result = await client.chat.completions.create({
         model,
@@ -138,7 +146,7 @@ async function singlePassAnalysis(
           { role: 'user', content: userPrompt },
         ],
         temperature: 0.3,
-        max_completion_tokens: 65536,
+        ...buildMaxTokensParam(16000),
         response_format: { type: 'json_object' },
       } as any);
 
@@ -146,16 +154,16 @@ async function singlePassAnalysis(
       const finishReason = result.choices[0]?.finish_reason;
       logger.info('Single-pass API response', { finishReason, contentLength: content?.length || 0, model: (result as any).model });
 
+      if (finishReason === 'length') {
+        throw new Error(`Response truncated (finish_reason: length, content_length: ${content?.length || 0}). Output token limit may be too low.`);
+      }
       if (!content || content.length < 10) {
         throw new Error(`Empty or too short response from API (finish_reason: ${finishReason}, length: ${content?.length || 0})`);
       }
-      return result;
+      return normalizeAnalysisResult(content);
     },
     { maxAttempts: 3, baseDelayMs: 10000 }
   );
-
-  const content = response.choices[0]?.message?.content || '{}';
-  return normalizeAnalysisResult(content);
 }
 
 // --- 分段分析（长文本）---
@@ -192,7 +200,7 @@ async function chunkedAnalysis(
             { role: 'user', content: chunkPrompt },
           ],
           temperature: 0.3,
-          max_completion_tokens: 32000,
+          ...buildMaxTokensParam(8000),
         } as any);
 
         const content = result.choices?.[0]?.message?.content;
@@ -206,6 +214,9 @@ async function chunkedAnalysis(
           model: (result as any).model || 'unknown',
         });
 
+        if (finishReason === 'length') {
+          logger.warn(`Chunk ${i + 1} response truncated`, { contentLength: content?.length || 0 });
+        }
         if (!content || content.trim().length < 50) {
           logger.error(`Chunk ${i + 1} empty response debug`, {
             fullResponse: JSON.stringify(result).substring(0, 1000),
@@ -246,7 +257,7 @@ async function chunkedAnalysis(
     keyPointsCount: config.analysis.keyPointsCount,
   });
 
-  const finalResponse = await withRetry(
+  return await withRetry(
     async () => {
       const result = await client.chat.completions.create({
         model,
@@ -255,7 +266,7 @@ async function chunkedAnalysis(
           { role: 'user', content: mergePrompt },
         ],
         temperature: 0.3,
-        max_completion_tokens: 65536,
+        ...buildMaxTokensParam(16000),
         response_format: { type: 'json_object' },
       } as any);
 
@@ -263,16 +274,16 @@ async function chunkedAnalysis(
       const finishReason = result.choices[0]?.finish_reason;
       logger.info('Merge API response', { finishReason, contentLength: content?.length || 0 });
 
+      if (finishReason === 'length') {
+        throw new Error(`Merge response truncated (finish_reason: length, content_length: ${content?.length || 0}). Output token limit may be too low.`);
+      }
       if (!content || content.length < 10) {
         throw new Error(`Merge response empty (finish_reason: ${finishReason}, length: ${content?.length || 0})`);
       }
-      return result;
+      return normalizeAnalysisResult(content);
     },
     { maxAttempts: 3, baseDelayMs: 15000 }
   );
-
-  const content = finalResponse.choices[0]?.message?.content || '{}';
-  return normalizeAnalysisResult(content);
 }
 
 // --- 工具函数 ---
@@ -360,16 +371,31 @@ function normalizeAnalysisResult(jsonStr: string): AnalysisOutput {
         }))
       : [];
 
+    // 验证分析结果完整性：4 个核心字段都应该有实质内容
+    const missingFields: string[] = [];
+    if (!summary || summary.length < 50) missingFields.push('summary');
+    if (keyPoints.length === 0) missingFields.push('keyPoints');
+    if (keywords.length === 0) missingFields.push('keywords');
+    if (!fullRecap || fullRecap.length < 50) missingFields.push('fullRecap');
+
+    if (missingFields.length > 0) {
+      logger.warn('Analysis result incomplete - missing or empty fields', {
+        missingFields,
+        summaryLen: summary.length,
+        keyPointsCount: keyPoints.length,
+        keywordsCount: keywords.length,
+        fullRecapLen: fullRecap.length,
+        rawPreview: jsonStr.substring(0, 300),
+      });
+      // 如果缺失 2 个以上核心字段，说明输出被严重截断，直接抛错触发重试
+      if (missingFields.length >= 2) {
+        throw new Error(`Analysis output severely incomplete: missing ${missingFields.join(', ')}. Likely caused by output token truncation.`);
+      }
+    }
+
     return { summary, keyPoints, keywords, fullRecap, mainArguments, knowledgePoints };
   } catch (error) {
     logger.error('Failed to parse analysis result', { error: (error as Error).message, raw: jsonStr.substring(0, 500) });
-    return {
-      summary: '分析结果解析失败',
-      keyPoints: [],
-      keywords: [],
-      fullRecap: '',
-      mainArguments: [],
-      knowledgePoints: [],
-    };
+    throw error; // 向上抛出，触发 withRetry 重试
   }
 }
