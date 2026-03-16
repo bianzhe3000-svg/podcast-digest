@@ -1,0 +1,6 @@
+name = "audio-proxy"
+main = "audio-proxy.js"
+compatibility_date = "2024-01-01"
+
+# 免费版已足够。如需处理大文件(>100MB)可升级到 Workers Paid ($5/mo)
+# account_id = "your-account-id"  # 可选，wrangler 会自动检测

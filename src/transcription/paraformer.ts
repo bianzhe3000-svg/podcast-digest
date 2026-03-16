@@ -115,6 +115,125 @@ async function resolveRedirects(url: string): Promise<string> {
 }
 
 /**
+ * 通过外部代理下载音频文件到本地
+ * 用于绕过 CDN（如 CloudFront）对云服务器 IP 的封锁/限速
+ * 代理服务部署在 Cloudflare Worker 等边缘平台，拥有非云服务器 IP
+ */
+async function downloadViaProxy(audioUrl: string, destPath: string): Promise<void> {
+  const proxyBaseUrl = config.processing.audioProxyUrl;
+  if (!proxyBaseUrl) {
+    throw new Error('AUDIO_PROXY_URL is not configured');
+  }
+
+  // 代理 URL 格式: {proxyBaseUrl}?url={encodedAudioUrl}
+  const proxyUrl = `${proxyBaseUrl}?url=${encodeURIComponent(audioUrl)}`;
+  logger.info('Downloading audio via proxy', {
+    proxy: proxyBaseUrl.substring(0, 60),
+    audioUrl: audioUrl.substring(0, 80),
+  });
+
+  const headers: Record<string, string> = { 'User-Agent': 'PodcastDigest/2.0' };
+  // 如果配置了代理认证 token，添加 Authorization 头
+  if (config.processing.audioProxyToken) {
+    headers['Authorization'] = `Bearer ${config.processing.audioProxyToken}`;
+  }
+
+  const response = await axios({
+    method: 'get',
+    url: proxyUrl,
+    responseType: 'stream',
+    timeout: 600000, // 10 分钟（代理下载通常比直接从云服务器下载快得多）
+    maxRedirects: 5,
+    headers,
+  });
+
+  const writer = fs.createWriteStream(destPath);
+  response.data.pipe(writer);
+  await new Promise<void>((resolve, reject) => {
+    writer.on('finish', resolve);
+    writer.on('error', reject);
+    response.data.on('error', reject);
+  });
+
+  const fileSize = fs.statSync(destPath).size;
+  if (fileSize < 10000) {
+    // 太小的文件可能是错误响应
+    const content = fs.readFileSync(destPath, 'utf-8').substring(0, 500);
+    throw new Error(`Proxy returned suspiciously small file (${fileSize} bytes): ${content}`);
+  }
+
+  logger.info('Audio downloaded via proxy', { sizeMB: (fileSize / 1024 / 1024).toFixed(1) });
+}
+
+/**
+ * 通过代理下载音频，然后上传到 DashScope OSS
+ */
+async function downloadViaProxyAndUploadToDashScope(audioUrl: string, apiKey: string): Promise<string> {
+  const tempDir = config.storage.tempDir;
+  if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir, { recursive: true });
+  }
+  const tempPath = path.join(tempDir, `proxy_upload_${Date.now()}.mp3`);
+
+  try {
+    // Step 1: 通过代理下载音频
+    await downloadViaProxy(audioUrl, tempPath);
+
+    // Step 2: 上传到 DashScope OSS（复用上传逻辑）
+    return await uploadToDashScopeOSS(tempPath, apiKey);
+  } finally {
+    if (fs.existsSync(tempPath)) {
+      try { fs.unlinkSync(tempPath); } catch {}
+    }
+  }
+}
+
+/**
+ * 上传本地文件到 DashScope OSS，返回 oss:// URL
+ * 从 downloadAndUploadToDashScope 中抽取的公共上传逻辑
+ */
+async function uploadToDashScopeOSS(localFilePath: string, apiKey: string): Promise<string> {
+  // 获取 DashScope 上传凭证
+  logger.info('Getting DashScope upload policy');
+  const policyResponse = await axios.get(DASHSCOPE_UPLOAD_POLICY_URL, {
+    params: { action: 'getPolicy', model: config.dashscope.speechModel },
+    headers: { 'Authorization': `Bearer ${apiKey}` },
+    timeout: 15000,
+  });
+
+  const policy = policyResponse.data?.data;
+  if (!policy?.policy || !policy?.signature || !policy?.upload_host || !policy?.upload_dir) {
+    throw new Error(`Failed to get upload policy: ${JSON.stringify(policyResponse.data).substring(0, 300)}`);
+  }
+
+  // 上传文件到 OSS
+  const filename = path.basename(localFilePath);
+  const ossKey = `${policy.upload_dir}/${filename}`;
+
+  const form = new FormData();
+  form.append('OSSAccessKeyId', policy.oss_access_key_id);
+  form.append('Signature', policy.signature);
+  form.append('policy', policy.policy);
+  form.append('key', ossKey);
+  form.append('x-oss-object-acl', 'private');
+  form.append('x-oss-forbid-overwrite', 'true');
+  form.append('success_action_status', '200');
+  form.append('file', fs.createReadStream(localFilePath));
+
+  logger.info('Uploading audio to DashScope OSS', { ossKey });
+  await axios.post(policy.upload_host, form, {
+    headers: form.getHeaders(),
+    timeout: 1800000,
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
+  });
+
+  const ossUrl = `oss://${ossKey}`;
+  logger.info('Audio uploaded to DashScope OSS', { ossUrl });
+  return ossUrl;
+}
+
+/**
  * 下载音频文件到本地，然后上传到 DashScope OSS 获取 oss:// URL
  */
 async function downloadAndUploadToDashScope(audioUrl: string, apiKey: string): Promise<string> {
@@ -147,44 +266,8 @@ async function downloadAndUploadToDashScope(audioUrl: string, apiKey: string): P
     const fileSize = fs.statSync(tempPath).size;
     logger.info('Audio downloaded for upload', { sizeMB: (fileSize / 1024 / 1024).toFixed(1) });
 
-    // Step 2: 获取 DashScope 上传凭证
-    logger.info('Getting DashScope upload policy');
-    const policyResponse = await axios.get(DASHSCOPE_UPLOAD_POLICY_URL, {
-      params: { action: 'getPolicy', model: config.dashscope.speechModel },
-      headers: { 'Authorization': `Bearer ${apiKey}` },
-      timeout: 15000,
-    });
-
-    const policy = policyResponse.data?.data;
-    if (!policy?.policy || !policy?.signature || !policy?.upload_host || !policy?.upload_dir) {
-      throw new Error(`Failed to get upload policy: ${JSON.stringify(policyResponse.data).substring(0, 300)}`);
-    }
-
-    // Step 3: 上传文件到 OSS
-    const filename = path.basename(tempPath);
-    const ossKey = `${policy.upload_dir}/${filename}`;
-
-    const form = new FormData();
-    form.append('OSSAccessKeyId', policy.oss_access_key_id);
-    form.append('Signature', policy.signature);
-    form.append('policy', policy.policy);
-    form.append('key', ossKey);
-    form.append('x-oss-object-acl', 'private');
-    form.append('x-oss-forbid-overwrite', 'true');
-    form.append('success_action_status', '200');
-    form.append('file', fs.createReadStream(tempPath));
-
-    logger.info('Uploading audio to DashScope OSS', { ossKey });
-    await axios.post(policy.upload_host, form, {
-      headers: form.getHeaders(),
-      timeout: 1800000, // 30 分钟，大音频文件上传需要更多时间
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-    });
-
-    const ossUrl = `oss://${ossKey}`;
-    logger.info('Audio uploaded to DashScope OSS', { ossUrl });
-    return ossUrl;
+    // Step 2: 上传到 DashScope OSS
+    return await uploadToDashScopeOSS(tempPath, apiKey);
   } finally {
     // 清理临时文件
     if (fs.existsSync(tempPath)) {
@@ -288,25 +371,59 @@ export async function transcribeWithParaformer(audioUrl: string): Promise<Transc
   logger.info('Submitting Paraformer transcription task', { audioUrl: resolvedUrl.substring(0, 120), model });
 
   try {
-    // 第一次尝试：直接传 URL
+    // 第1层：直接传 URL 给 Paraformer（最快，Paraformer 自己下载）
     return await submitAndPollParaformer(resolvedUrl, apiKey, model);
   } catch (error) {
     const errMsg = (error as Error).message;
 
     // 判断是否是文件下载失败错误
-    if (errMsg.includes('FILE_DOWNLOAD_FAILED') || errMsg.includes('FILE_403_FORBIDDEN')) {
-      logger.warn('Paraformer cannot download audio URL, falling back to upload mode', {
-        originalUrl: audioUrl.substring(0, 80),
-        error: errMsg,
-      });
-
-      // 回退：下载到本地 → 上传 DashScope OSS → 用 oss:// URL 重试
-      const ossUrl = await downloadAndUploadToDashScope(audioUrl, apiKey);
-      return await submitAndPollParaformer(ossUrl, apiKey, model, true);
+    if (!errMsg.includes('FILE_DOWNLOAD_FAILED') && !errMsg.includes('FILE_403_FORBIDDEN')) {
+      // 非下载失败错误，直接抛出
+      throw error;
     }
 
-    // 其他错误直接抛出
-    throw error;
+    logger.warn('Paraformer cannot download audio URL, falling back to upload mode', {
+      originalUrl: audioUrl.substring(0, 80),
+      error: errMsg,
+    });
+
+    // 第2层：服务器直接下载 → 上传 DashScope OSS
+    try {
+      const ossUrl = await downloadAndUploadToDashScope(audioUrl, apiKey);
+      return await submitAndPollParaformer(ossUrl, apiKey, model, true);
+    } catch (layer2Error) {
+      const layer2Msg = (layer2Error as Error).message;
+      logger.warn('Layer 2 (direct download) failed', { error: layer2Msg });
+
+      // 第3层：通过外部代理下载 → 上传 DashScope OSS
+      // 仅在配置了代理 URL 且第2层失败时触发
+      if (!config.processing.audioProxyUrl) {
+        logger.error('Layer 2 failed and no AUDIO_PROXY_URL configured for Layer 3 fallback');
+        throw layer2Error;
+      }
+
+      logger.info('Attempting Layer 3: proxy download → DashScope OSS upload', {
+        proxyUrl: config.processing.audioProxyUrl.substring(0, 60),
+      });
+
+      try {
+        const ossUrl = await downloadViaProxyAndUploadToDashScope(audioUrl, apiKey);
+        return await submitAndPollParaformer(ossUrl, apiKey, model, true);
+      } catch (layer3Error) {
+        const layer3Msg = (layer3Error as Error).message;
+        logger.error('All 3 download layers failed', {
+          layer1: errMsg.substring(0, 100),
+          layer2: layer2Msg.substring(0, 100),
+          layer3: layer3Msg.substring(0, 100),
+        });
+        throw new Error(
+          `Audio download failed at all 3 layers. ` +
+          `L1(Paraformer direct): ${errMsg.substring(0, 80)}; ` +
+          `L2(server download): ${layer2Msg.substring(0, 80)}; ` +
+          `L3(proxy download): ${layer3Msg.substring(0, 80)}`
+        );
+      }
+    }
   }
 }
 

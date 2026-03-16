@@ -54,6 +54,8 @@ export const config = {
     maxRetryAttempts: envInt('MAX_RETRY_ATTEMPTS', 3),
     audioDownloadTimeout: envInt('AUDIO_DOWNLOAD_TIMEOUT', 300000),
     audioMaxChunkSizeMB: envInt('AUDIO_MAX_CHUNK_SIZE_MB', 25),
+    audioProxyUrl: env('AUDIO_PROXY_URL', ''), // Cloudflare Worker 代理 URL，用于绕过 CDN 对云服务器 IP 的限制
+    audioProxyToken: env('AUDIO_PROXY_TOKEN', ''), // 代理服务的认证 token
   },
 
   scheduler: {
