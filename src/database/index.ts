@@ -389,12 +389,13 @@ class DatabaseManager {
   searchEpisodesByKeyword(keyword: string, limit = 20): Array<{
     episode_id: number; podcast_name: string; episode_title: string;
     published_at: string; summary: string; key_points: string;
-    arguments: string; knowledge_points: string;
+    arguments: string; knowledge_points: string; markdown_path: string | null;
   }> {
     const kw = `%${keyword}%`;
     return this.db.prepare(`
       SELECT e.id as episode_id, p.name as podcast_name, e.title as episode_title,
-             e.published_at, a.summary, a.key_points, a.arguments, a.knowledge_points
+             e.published_at, a.summary, a.key_points, a.arguments, a.knowledge_points,
+             a.markdown_path
       FROM analysis_results a
       JOIN episodes e ON e.id = a.episode_id
       JOIN podcasts p ON p.id = e.podcast_id
@@ -411,11 +412,11 @@ class DatabaseManager {
   /** 获取某个播客的所有已分析剧集（用于播客作用域对话） */
   getAnalyzedEpisodesByPodcast(podcastId: number, limit = 30): Array<{
     episode_id: number; episode_title: string; published_at: string;
-    summary: string; key_points: string;
+    summary: string; key_points: string; markdown_path: string | null;
   }> {
     return this.db.prepare(`
       SELECT e.id as episode_id, e.title as episode_title, e.published_at,
-             a.summary, a.key_points
+             a.summary, a.key_points, a.markdown_path
       FROM analysis_results a
       JOIN episodes e ON e.id = a.episode_id
       WHERE e.podcast_id = ?
@@ -429,10 +430,12 @@ class DatabaseManager {
     podcast_name: string; episode_title: string; published_at: string;
     summary: string; key_points: string; arguments: string;
     knowledge_points: string; transcript: string | null;
+    markdown_path: string | null;
   } | undefined {
     return this.db.prepare(`
       SELECT p.name as podcast_name, e.title as episode_title, e.published_at,
-             a.summary, a.key_points, a.arguments, a.knowledge_points, a.transcript
+             a.summary, a.key_points, a.arguments, a.knowledge_points, a.transcript,
+             a.markdown_path
       FROM analysis_results a
       JOIN episodes e ON e.id = a.episode_id
       JOIN podcasts p ON p.id = e.podcast_id

@@ -973,6 +973,13 @@ h3 { font-size: 16px; margin-bottom: 12px; font-weight: 600; }
 
 .chat-citation:hover { background: var(--primary); color: white; }
 
+.chat-citation-disabled {
+  background: #f1f5f9 !important;
+  color: #94a3b8 !important;
+  cursor: not-allowed !important;
+}
+.chat-citation-disabled:hover { background: #f1f5f9 !important; color: #94a3b8 !important; }
+
 /* Responsive */
 @media (max-width: 768px) {
   .sidebar { width: 60px; }

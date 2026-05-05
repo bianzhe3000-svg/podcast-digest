@@ -898,7 +898,18 @@ router.post('/chat', async (req: Request, res: Response) => {
 
     const db = getDatabase();
     let context = '';
-    const citations: Array<{ episodeId: number; podcastName: string; episodeTitle: string; publishedAt: string }> = [];
+    const citations: Array<{
+      episodeId: number; podcastName: string; episodeTitle: string;
+      publishedAt: string; podcastDir?: string; filename?: string;
+    }> = [];
+
+    // 从 markdown_path（如 'summaries/PodcastName/file.md'）提取目录名和文件名
+    const splitMdPath = (p: string | null | undefined): { podcastDir?: string; filename?: string } => {
+      if (!p) return {};
+      const parts = p.split('/').filter(Boolean);
+      if (parts.length < 2) return {};
+      return { podcastDir: parts[parts.length - 2], filename: parts[parts.length - 1] };
+    };
 
     if (scope === 'episode') {
       const epId = parseInt(String(scopeId), 10);
@@ -915,7 +926,8 @@ router.post('/chat', async (req: Request, res: Response) => {
         kwText = kw.map(k => `· ${k.word}：${k.context || ''}`).join('\n');
       } catch {}
       context = `这是一集播客的完整内容：\n\n【${ep.podcast_name}：${ep.episode_title}】\n发布时间：${ep.published_at}\n\n摘要：\n${ep.summary}\n\n核心要点：\n${kpText}\n\n关键词：\n${kwText}\n\n详细纪要：\n${(ep.knowledge_points || '').slice(0, 4000)}\n\n基于以上内容回答用户问题，准确、简洁、有见地。`;
-      citations.push({ episodeId: epId, podcastName: ep.podcast_name, episodeTitle: ep.episode_title, publishedAt: ep.published_at });
+      const md = splitMdPath(ep.markdown_path);
+      citations.push({ episodeId: epId, podcastName: ep.podcast_name, episodeTitle: ep.episode_title, publishedAt: ep.published_at, ...md });
     } else if (scope === 'podcast') {
       const podcastId = parseInt(String(scopeId), 10);
       const podcast = db.getPodcastById(podcastId);
@@ -934,7 +946,8 @@ router.post('/chat', async (req: Request, res: Response) => {
         if (charCount + block.length > 14000) break;
         context += block;
         charCount += block.length;
-        citations.push({ episodeId: ep.episode_id, podcastName: podcast.name, episodeTitle: ep.episode_title, publishedAt: ep.published_at });
+        const md = splitMdPath(ep.markdown_path);
+        citations.push({ episodeId: ep.episode_id, podcastName: podcast.name, episodeTitle: ep.episode_title, publishedAt: ep.published_at, ...md });
       }
       context += `\n基于以上内容回答用户问题，可在回答中明确引用具体剧集名。`;
     } else if (scope === 'date') {
@@ -959,7 +972,8 @@ router.post('/chat', async (req: Request, res: Response) => {
         if (charCount + block.length > 12000) break;
         context += block;
         charCount += block.length;
-        citations.push({ episodeId: id, podcastName: podcast?.name || '', episodeTitle: ep.title, publishedAt: ep.published_at });
+        const md = splitMdPath(a.markdown_path);
+        citations.push({ episodeId: id, podcastName: podcast?.name || '', episodeTitle: ep.title, publishedAt: ep.published_at, ...md });
       }
     } else {
       // === scope === 'global' ===
@@ -1021,7 +1035,8 @@ router.post('/chat', async (req: Request, res: Response) => {
         if (charCount + block.length > 14000) break;
         context += block;
         charCount += block.length;
-        citations.push({ episodeId: c.episode_id, podcastName: c.podcast_name, episodeTitle: c.episode_title, publishedAt: c.published_at });
+        const md = splitMdPath(c.markdown_path);
+        citations.push({ episodeId: c.episode_id, podcastName: c.podcast_name, episodeTitle: c.episode_title, publishedAt: c.published_at, ...md });
       }
       context += `\n基于以上检索结果回答用户问题。要求：\n1. 准确、简洁，引用具体剧集名（用「播客名：剧集名」格式）\n2. 如果是搜索意图（用户找内容），列出 3-5 个最相关剧集并简述每集亮点\n3. 如果是问答意图，综合多集信息给出深度回答\n4. 引用时使用格式：「《播客名：剧集名》提到..."`;
     }

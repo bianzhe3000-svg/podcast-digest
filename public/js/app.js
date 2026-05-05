@@ -829,6 +829,43 @@ const App = {
     this._globalChatState.history = [];
   },
 
+  /** 点击 chat citation chip：跳转到「文档浏览」并打开对应剧集文档 */
+  openCitation(podcastDir, filename, episodeId) {
+    if (!podcastDir || !filename) {
+      this.toast('该剧集没有保存的文档', 'error');
+      return;
+    }
+    // 切换到文档浏览页
+    this.navigateTo('documents');
+    // loadDocuments() 是异步的，需要等侧边栏渲染完才能高亮
+    const tryOpen = (retries = 0) => {
+      const sidebar = document.getElementById('doc-sidebar');
+      if (!sidebar || sidebar.textContent === '加载中...') {
+        if (retries < 20) return setTimeout(() => tryOpen(retries + 1), 200);
+      }
+      this.viewDocument(podcastDir, filename, episodeId);
+      // 滚动到「摘要」标题（marked 渲染后的 h1/h2）
+      setTimeout(() => {
+        const viewer = document.getElementById('doc-viewer');
+        if (!viewer) return;
+        // 优先找标题包含「摘要」的 heading；否则滚到顶部
+        const headings = viewer.querySelectorAll('h1, h2, h3');
+        let target = null;
+        for (const h of headings) {
+          if (h.textContent && h.textContent.includes('摘要')) { target = h; break; }
+        }
+        (target || viewer).scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 800);
+    };
+    setTimeout(() => tryOpen(), 300);
+  },
+
+  /** HTML attribute 安全转义（用于 onclick 内联字符串） */
+  escapeAttr(str) {
+    if (!str) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  },
+
   async sendGlobalChat() {
     const input = document.getElementById('global-chat-input');
     const messagesEl = document.getElementById('global-chat-messages');
@@ -877,9 +914,14 @@ const App = {
       if (result.citations && result.citations.length > 0) {
         const cites = document.createElement('div');
         cites.className = 'chat-message-citations';
-        cites.innerHTML = '📎 引用剧集：' + result.citations.slice(0, 8).map(c =>
-          `<span class="chat-citation">${this.escapeHtml(c.podcastName)}：${this.escapeHtml(c.episodeTitle.slice(0, 30))}${c.episodeTitle.length > 30 ? '...' : ''}</span>`
-        ).join('');
+        cites.innerHTML = '📎 引用剧集（点击跳转文档）：' + result.citations.slice(0, 8).map(c => {
+          const label = `${this.escapeHtml(c.podcastName)}：${this.escapeHtml(c.episodeTitle.slice(0, 30))}${c.episodeTitle.length > 30 ? '...' : ''}`;
+          if (c.podcastDir && c.filename) {
+            return `<a class="chat-citation" href="javascript:void(0)" onclick="App.openCitation('${this.escapeAttr(c.podcastDir)}','${this.escapeAttr(c.filename)}',${c.episodeId || 'null'});return false;" title="点击查看完整文档">${label}</a>`;
+          }
+          // 没有 markdown 文件的剧集
+          return `<span class="chat-citation chat-citation-disabled" title="该剧集无文档文件">${label}</span>`;
+        }).join('');
         wrap.appendChild(cites);
       }
       messagesEl.appendChild(wrap);
