@@ -415,8 +415,13 @@ ${audioUrl ? `  <div class="audio-section">
 /**
  * 生成并保存每日摘要（不发邮件），供 WebUI 调用
  * 返回包含摘要文本、音频文件名、剧集 ID 列表的对象
+ *
+ * 可选 onStage 回调：每进入新阶段调用一次（用于在 task_log 中记录进度）
  */
-export async function generateAndSaveDigest(sinceHours: number = 24): Promise<{
+export async function generateAndSaveDigest(
+  sinceHours: number = 24,
+  onStage?: (stage: string) => void
+): Promise<{
   ok: boolean;
   episodeCount: number;
   date: string;
@@ -427,7 +432,9 @@ export async function generateAndSaveDigest(sinceHours: number = 24): Promise<{
   error?: string;
 }> {
   const today = dayjs().tz('Asia/Shanghai').format('YYYY-MM-DD');
+  const stage = (s: string) => { logger.info(`[digest stage] ${s}`); onStage?.(s); };
   try {
+    stage('fetching_episodes');
     const rawEpisodes = getRecentCompletedEpisodes(sinceHours);
     if (rawEpisodes.length === 0) {
       return { ok: false, episodeCount: 0, date: today, error: `过去 ${sinceHours} 小时没有已完成的剧集` };
@@ -435,9 +442,9 @@ export async function generateAndSaveDigest(sinceHours: number = 24): Promise<{
     const episodes = sortEpisodesByPodcast(rawEpisodes);
     const dateStr = dayjs().tz('Asia/Shanghai').format('YYYY年MM月DD日');
 
-    logger.info('Generating digest', { sinceHours, episodes: episodes.length });
-
+    stage(`summary_generating (${episodes.length} episodes)`);
     const dailySummary = await generateDailySummary(episodes, dateStr);
+    stage(`summary_done (${dailySummary.length} chars)`);
 
     // 音频
     const episodesInput = episodes.map((ep, i) => {
@@ -453,19 +460,24 @@ export async function generateAndSaveDigest(sinceHours: number = 24): Promise<{
     let audioGenerated = false;
     let audioError: string | undefined;
     try {
-      audioFilename = await generateDailyDialogue(episodesInput, dateStr, episodes.length);
+      stage('audio_generating');
+      audioFilename = await generateDailyDialogue(episodesInput, dateStr, episodes.length, onStage);
       audioGenerated = !!audioFilename;
       if (!audioFilename) audioError = 'TTS 全部失败或脚本为空';
+      stage(audioGenerated ? 'audio_done' : 'audio_failed');
     } catch (err) {
       audioError = (err as Error).message;
       logger.warn('Audio generation failed', { error: audioError });
+      stage(`audio_error: ${audioError.slice(0, 80)}`);
     }
 
     // 保存到数据库
+    stage('saving_to_db');
     const db = getDatabase();
     const episodeIds = episodes.map(ep => ep.episode.id);
     db.saveDailyDigest(today, dailySummary || '', audioFilename, episodeIds);
     logger.info('Digest saved to DB', { date: today, episodes: episodeIds.length, audio: audioGenerated });
+    stage('completed');
 
     return {
       ok: true,
@@ -477,6 +489,7 @@ export async function generateAndSaveDigest(sinceHours: number = 24): Promise<{
       audioError,
     };
   } catch (err) {
+    stage(`error: ${(err as Error).message.slice(0, 80)}`);
     return { ok: false, episodeCount: 0, date: today, error: (err as Error).message };
   }
 }

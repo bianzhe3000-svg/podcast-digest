@@ -689,12 +689,17 @@ router.post('/digest/generate', (req: Request, res: Response) => {
   const taskLogId = db.createTaskLog(`generate_digest_${sinceHours}h`);
   res.json({ success: true, data: { message: `已开始生成（窗口 ${sinceHours} 小时）`, taskLogId } });
 
-  generateAndSaveDigest(sinceHours).then(result => {
+  // onStage 把当前阶段写入 task_log.error_details（实时进度可见）
+  const onStage = (s: string) => {
+    try { db.updateTaskLog(taskLogId, { error_details: `[stage] ${s}` }); } catch {}
+  };
+
+  generateAndSaveDigest(sinceHours, onStage).then(result => {
     db.updateTaskLog(taskLogId, {
       status: result.ok ? 'completed' : 'failed',
       total_episodes: result.episodeCount,
       processed_episodes: result.episodeCount,
-      error_details: result.error || result.audioError,
+      error_details: result.error || result.audioError || (result.audioGenerated ? null : 'audio missing') || undefined,
     });
     logger.info('Digest generation done', { ok: result.ok, episodes: result.episodeCount, audio: result.audioGenerated, audioErr: result.audioError });
   }).catch(err => {

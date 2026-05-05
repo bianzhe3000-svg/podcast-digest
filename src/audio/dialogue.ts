@@ -181,13 +181,17 @@ export async function testTts(text = '你好，这是 CosyVoice 语音合成测�
 export async function generateDailyDialogue(
   episodesInput: string,
   dateStr: string,
-  episodeCount: number
+  episodeCount: number,
+  onStage?: (stage: string) => void
 ): Promise<string | null> {
+  const stage = (s: string) => onStage?.(s);
   try {
     // 4-1. 生成脚本
+    stage('script_generating');
     logger.info('Generating dialogue script', { episodeCount });
     const script = await generateScript(episodesInput, dateStr, episodeCount);
     if (!script) throw new Error('Empty dialogue script');
+    stage(`script_done (${script.length} chars)`);
 
     const lines = parseScript(script);
     if (lines.length === 0) throw new Error('No dialogue lines parsed');
@@ -196,6 +200,7 @@ export async function generateDailyDialogue(
     const turns = groupIntoTurns(lines);
     const totalChars = turns.reduce((s, t) => s + t.text.length, 0);
     logger.info(`Dialogue: ${lines.length} lines → ${turns.length} speaker turns, ${totalChars} chars total`);
+    stage(`tts_starting (${turns.length} turns, ${totalChars} chars)`);
 
     // 4-2. 串行合成轮次（每轮 1 次 TTS 调用），早期失败熔断
     const buffers: Buffer[] = [];
@@ -227,6 +232,7 @@ export async function generateDailyDialogue(
       if ((i + 1) % 5 === 0) {
         const elapsed = Math.round((Date.now() - startTs) / 1000);
         logger.info(`TTS progress ${i + 1}/${turns.length} (ok=${successCount}, fail=${failCount}, ${elapsed}s elapsed)`);
+        stage(`tts_progress ${i + 1}/${turns.length} ok=${successCount}`);
       }
     }
 
