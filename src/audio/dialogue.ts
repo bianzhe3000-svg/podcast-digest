@@ -79,6 +79,33 @@ function parseScript(script: string): DialogueLine[] {
     .filter(l => l.text.length > 0);
 }
 
+/**
+ * 把连续同说话人的多行合并成一个"轮次"，每个轮次 = 1 次 TTS 调用
+ * 单个轮次的文本上限 ~800 字（Qwen-TTS 接受范围内）；超长则切分
+ */
+function groupIntoTurns(lines: DialogueLine[]): DialogueLine[] {
+  const MAX_CHARS_PER_TURN = 800;
+  const turns: DialogueLine[] = [];
+  let current: DialogueLine | null = null;
+
+  for (const line of lines) {
+    if (!current || current.speaker !== line.speaker) {
+      // 切换说话人或第一行：新建轮次
+      if (current) turns.push(current);
+      current = { speaker: line.speaker, text: line.text };
+    } else if (current.text.length + line.text.length + 1 <= MAX_CHARS_PER_TURN) {
+      // 同说话人 + 不超长：合并到当前轮次
+      current.text = current.text + '。' + line.text;
+    } else {
+      // 同说话人但当前轮次已接近上限：新起一个轮次
+      turns.push(current);
+      current = { speaker: line.speaker, text: line.text };
+    }
+  }
+  if (current) turns.push(current);
+  return turns;
+}
+
 // ── 3. 单行 TTS 合成（CosyVoice-v2）────────────────────────────────────────
 
 async function synthesize(text: string, voice: string, attempt = 1): Promise<Buffer> {
@@ -163,55 +190,51 @@ export async function generateDailyDialogue(
     if (!script) throw new Error('Empty dialogue script');
 
     const lines = parseScript(script);
-    logger.info(`Dialogue parsed: ${lines.length} lines`);
     if (lines.length === 0) throw new Error('No dialogue lines parsed');
 
-    // 4-2. 小批量并发合成（每批 2 条，控制总时长在 ~10 分钟内完成 100+ 行）
-    // 经验值：Qwen3-TTS-Flash 单次调用约 3-5 秒，2 并发不会触发限流
-    const BATCH = 2;
-    const BATCH_DELAY_MS = 150;
+    // 把连续同说话人合并成轮次：100+ 行降到 ~30 轮次 → API 调用减少 5 倍
+    const turns = groupIntoTurns(lines);
+    const totalChars = turns.reduce((s, t) => s + t.text.length, 0);
+    logger.info(`Dialogue: ${lines.length} lines → ${turns.length} speaker turns, ${totalChars} chars total`);
+
+    // 4-2. 串行合成轮次（每轮 1 次 TTS 调用），早期失败熔断
     const buffers: Buffer[] = [];
     let successCount = 0;
     let failCount = 0;
+    let consecutiveFailures = 0;
     let lastError = '';
+    const startTs = Date.now();
 
-    for (let i = 0; i < lines.length; i += BATCH) {
-      const batch = lines.slice(i, i + BATCH);
-      const results = await Promise.all(
-        batch.map(async (line) => {
-          const voice = line.speaker === 'A' ? VOICE_A : VOICE_B;
-          try {
-            const buf = await synthesize(line.text, voice);
-            return { ok: true as const, buf };
-          } catch (err) {
-            return { ok: false as const, error: (err as Error).message, text: line.text };
-          }
-        })
-      );
-      for (const r of results) {
-        if (r.ok) {
-          buffers.push(r.buf);
-          successCount++;
-        } else {
-          failCount++;
-          lastError = r.error;
-          logger.warn(`TTS failed`, { error: r.error, text: r.text.slice(0, 40) });
+    for (let i = 0; i < turns.length; i++) {
+      const turn = turns[i];
+      const voice = turn.speaker === 'A' ? VOICE_A : VOICE_B;
+      try {
+        const buf = await synthesize(turn.text, voice);
+        buffers.push(buf);
+        successCount++;
+        consecutiveFailures = 0;
+      } catch (err) {
+        failCount++;
+        consecutiveFailures++;
+        lastError = (err as Error).message;
+        logger.warn(`TTS turn ${i + 1}/${turns.length} failed`, { error: lastError, chars: turn.text.length, speaker: turn.speaker });
+        // 熔断：前 5 轮全部失败就放弃，不要白白等完所有调用
+        if (i < 5 && consecutiveFailures >= 5) {
+          throw new Error(`TTS circuit-broken: first ${consecutiveFailures} turns all failed. Last error: ${lastError}`);
         }
       }
-      if ((i / BATCH) % 5 === 0) {
-        logger.info(`TTS progress ${i + batch.length}/${lines.length} (ok=${successCount}, fail=${failCount})`);
+      // 进度日志（每 5 轮一次）
+      if ((i + 1) % 5 === 0) {
+        const elapsed = Math.round((Date.now() - startTs) / 1000);
+        logger.info(`TTS progress ${i + 1}/${turns.length} (ok=${successCount}, fail=${failCount}, ${elapsed}s elapsed)`);
       }
-      // 节流：批次之间小停顿
-      await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
     }
 
     const combined = Buffer.concat(buffers);
-    logger.info(`TTS done: ${successCount} ok, ${failCount} failed, totalBytes=${combined.length}`);
+    const elapsedSec = Math.round((Date.now() - startTs) / 1000);
+    logger.info(`TTS done: ${successCount}/${turns.length} ok, ${failCount} failed, ${Math.round(combined.length / 1024)}KB, ${elapsedSec}s`);
     if (combined.length === 0) {
-      throw new Error(`All ${lines.length} TTS segments failed. Last error: ${lastError}`);
-    }
-    if (failCount > lines.length * 0.3) {
-      logger.warn(`TTS partial: ${failCount}/${lines.length} failed (>30%)`);
+      throw new Error(`All ${turns.length} TTS turns failed. Last error: ${lastError}`);
     }
 
     // 4-3. 保存文件
