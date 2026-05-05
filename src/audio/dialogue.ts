@@ -17,7 +17,10 @@ import { logger } from '../utils/logger';
 const VOICE_A = 'Cherry'; // 女声·阳光（主持人甲）
 const VOICE_B = 'Ethan';  // 男声·温暖（主持人乙）
 
-export const AUDIO_DIR = '/tmp/podcast-audio';
+// 音频存储路径：放在数据库同一个目录下（确保使用 Railway Volume 持久化）
+// 优先使用环境变量 AUDIO_DIR，否则放在数据库目录的 audio 子目录
+export const AUDIO_DIR = process.env.AUDIO_DIR
+  || path.join(path.dirname(config.database.path), 'audio');
 
 interface DialogueLine {
   speaker: 'A' | 'B';
@@ -219,6 +222,26 @@ export async function generateDailyDialogue(
 
     const durationMin = Math.round(combined.length / (32000 / 8) / 60); // 估算时长（32kbps）
     logger.info('Daily dialogue audio ready', { filename, sizeKB: Math.round(combined.length / 1024), durationMin });
+
+    // 4-4. 清理 30 天前的旧音频文件，避免 Volume 被填满
+    try {
+      const KEEP_DAYS = 30;
+      const cutoff = Date.now() - KEEP_DAYS * 24 * 3600 * 1000;
+      const files = fs.readdirSync(AUDIO_DIR);
+      let removed = 0;
+      for (const f of files) {
+        if (!f.startsWith('digest-') || !f.endsWith('.mp3')) continue;
+        const fp = path.join(AUDIO_DIR, f);
+        const st = fs.statSync(fp);
+        if (st.mtimeMs < cutoff) {
+          fs.unlinkSync(fp);
+          removed++;
+        }
+      }
+      if (removed > 0) logger.info(`Audio rotation: removed ${removed} files older than ${KEEP_DAYS} days`);
+    } catch (e) {
+      logger.warn('Audio rotation failed', { error: (e as Error).message });
+    }
 
     return filename;
   } catch (err) {
