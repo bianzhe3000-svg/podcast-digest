@@ -58,24 +58,19 @@ ${episodesInput}
 - 总行数控制在 100-150 行
 - 直接输出对话，不要任何其他说明文字`;
 
-  // 显式 AbortController 兜底（300s）
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 300000);
-  let response;
-  try {
-    logger.info(`Generating script with model=${scriptModel}, max_tokens=10000`);
-    response = await client.chat.completions.create(
-      {
-        model: scriptModel,
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 10000,
-      },
-      { signal: ac.signal }
-    );
-  } finally {
-    clearTimeout(timer);
-  }
-  return response.choices[0]?.message?.content || '';
+  // 强制 300 秒硬超时：Promise.race 完全绕过 SDK 内部行为
+  logger.info(`Generating script with model=${scriptModel}, max_tokens=10000`);
+  const llmPromise = client.chat.completions.create({
+    model: scriptModel,
+    messages: [{ role: 'user', content: prompt }],
+    max_tokens: 10000,
+  }).then(r => r.choices[0]?.message?.content || '');
+
+  const timeoutPromise = new Promise<string>((_, reject) =>
+    setTimeout(() => reject(new Error('script LLM hard timeout 300s')), 300000)
+  );
+
+  return Promise.race([llmPromise, timeoutPromise]);
 }
 
 // ── 2. 解析脚本为逐行结构 ───────────────────────────────────────────────────
@@ -123,6 +118,17 @@ function groupIntoTurns(lines: DialogueLine[]): DialogueLine[] {
 // ── 3. 单行 TTS 合成（CosyVoice-v2）────────────────────────────────────────
 
 async function synthesize(text: string, voice: string, attempt = 1): Promise<Buffer> {
+  // 整体硬超时 60s（防止 axios timeout 失效导致 hang）
+  const innerCall = async (): Promise<Buffer> => {
+    return synthesizeInner(text, voice, attempt);
+  };
+  return Promise.race([
+    innerCall(),
+    new Promise<Buffer>((_, reject) => setTimeout(() => reject(new Error('TTS hard timeout 60s')), 60000)),
+  ]);
+}
+
+async function synthesizeInner(text: string, voice: string, attempt = 1): Promise<Buffer> {
   try {
     // Qwen3-TTS-Flash：通过 multimodal-generation/generation endpoint，返回 audio URL
     const res = await axios.post(
@@ -162,7 +168,7 @@ async function synthesize(text: string, voice: string, attempt = 1): Promise<Buf
       const delay = 1500 * Math.pow(2, attempt - 1);
       logger.warn(`TTS retry ${attempt + 1}/3 after ${delay}ms (status=${status})`);
       await new Promise(r => setTimeout(r, delay));
-      return synthesize(text, voice, attempt + 1);
+      return synthesizeInner(text, voice, attempt + 1);
     }
     let errMsg = err.message;
     if (err.response?.data) {

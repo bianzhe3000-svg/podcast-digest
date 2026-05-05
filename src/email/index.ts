@@ -105,30 +105,24 @@ async function generateDailySummary(episodes: DigestEpisode[], dateStr: string):
     const client = new OpenAI({
       apiKey: config.dashscope.apiKey,
       baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-      timeout: 120000,
-      maxRetries: 0,  // 不要 SDK 内部重试，超时立即失败
+      timeout: 60000,
+      maxRetries: 0,
     });
 
     logger.info('Generating daily summary via DashScope', { model: config.dashscope.textModel, episodes: episodes.length });
 
-    // 显式 AbortController 兜底超时（90秒），避免 SDK timeout 不生效
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 90000);
-    let response;
-    try {
-      response = await client.chat.completions.create(
-        {
-          model: config.dashscope.textModel,
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: 4000,
-        },
-        { signal: ac.signal }
-      );
-    } finally {
-      clearTimeout(timer);
-    }
+    // 强制 90 秒硬超时：Promise.race 完全绕过 SDK 内部行为
+    const llmPromise = client.chat.completions.create({
+      model: config.dashscope.textModel,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 4000,
+    }).then(r => r.choices[0]?.message?.content || '');
 
-    const text = response.choices[0]?.message?.content || '';
+    const timeoutPromise = new Promise<string>((_, reject) =>
+      setTimeout(() => reject(new Error('summary LLM hard timeout 90s')), 90000)
+    );
+
+    const text = await Promise.race([llmPromise, timeoutPromise]);
     logger.info('Daily summary generated', { length: text.length });
     return text;
   } catch (err) {
