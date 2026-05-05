@@ -8,6 +8,7 @@ import { sendDailyDigest, testEmailConnection } from '../email';
 import { listMarkdownFiles, listMarkdownFilesWithMeta, readMarkdown } from '../markdown';
 import { exportToPdf } from '../markdown/pdf';
 import { logger } from '../utils/logger';
+import { AUDIO_DIR } from '../audio/dialogue';
 import path from 'path';
 import fs from 'fs';
 
@@ -674,6 +675,24 @@ router.post('/email/send-digest', (req: Request, res: Response) => {
   }).catch(err => {
     logger.error('send-digest failed', { error: (err as Error).message });
   });
+});
+
+// === Audio file serving ===
+// 供邮件中的"点击收听"链接使用，文件保存在 /tmp/podcast-audio/
+router.get('/audio/:filename', (req: Request, res: Response) => {
+  // 过滤非法字符，只允许 字母数字-_.
+  const filename = String(req.params.filename).replace(/[^a-zA-Z0-9\-_.]/g, '');
+  const filePath = path.join(AUDIO_DIR, filename);
+  if (!fs.existsSync(filePath)) {
+    res.status(404).json({ error: 'Audio file not found' });
+    return;
+  }
+  const stat = fs.statSync(filePath);
+  res.setHeader('Content-Type', 'audio/mpeg');
+  res.setHeader('Content-Length', stat.size);
+  res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+  res.setHeader('Accept-Ranges', 'bytes');
+  fs.createReadStream(filePath).pipe(res);
 });
 
 // === Settings (non-sensitive) ===

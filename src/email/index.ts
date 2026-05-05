@@ -10,6 +10,7 @@ import { logger } from '../utils/logger';
 import { getDatabase, AnalysisResult, Episode, Podcast } from '../database';
 import { readMarkdown } from '../markdown';
 import { generateDigestPdf, PdfEpisodeData } from '../markdown/pdf';
+import { generateDailyDialogue, estimateAudioDuration } from '../audio/dialogue';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -195,7 +196,7 @@ function sortEpisodesByPodcast(episodes: DigestEpisode[]): DigestEpisode[] {
 /**
  * Build full HTML email with all 4 sections per episode
  */
-function buildDigestHtml(episodes: DigestEpisode[], dateStr: string, dailySummary?: string): string {
+function buildDigestHtml(episodes: DigestEpisode[], dateStr: string, dailySummary?: string, audioUrl?: string, audioDurationMin?: number): string {
   // episodes 已经在外部统一排好序
   const episodesByPodcast = new Map<string, DigestEpisode[]>();
   for (const ep of episodes) {
@@ -217,6 +218,12 @@ function buildDigestHtml(episodes: DigestEpisode[], dateStr: string, dailySummar
   .header h1 { margin: 0; font-size: 26px; letter-spacing: 1px; }
   .header .date { opacity: 0.9; margin-top: 8px; font-size: 15px; }
   .header .count { margin-top: 4px; font-size: 13px; opacity: 0.8; }
+
+  /* Audio player section */
+  .audio-section { padding: 20px 30px; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: #fff; text-align: center; }
+  .audio-section h2 { margin: 0 0 8px 0; font-size: 18px; letter-spacing: 0.5px; }
+  .audio-section .audio-meta { font-size: 13px; opacity: 0.7; margin-bottom: 16px; }
+  .audio-btn { display: inline-block; padding: 12px 32px; background: linear-gradient(135deg, #667eea, #764ba2); color: #fff; text-decoration: none; border-radius: 30px; font-size: 15px; font-weight: 600; letter-spacing: 0.5px; }
 
   .toc { padding: 20px 30px; background: #f8f9fa; border-bottom: 1px solid #e8e8e8; }
   .toc h2 { font-size: 16px; margin: 0 0 10px 0; color: #555; }
@@ -271,7 +278,12 @@ function buildDigestHtml(episodes: DigestEpisode[], dateStr: string, dailySummar
     <h1>🎧 Podcast Digest</h1>
     <div class="date">${dateStr}</div>
     <div class="count">过去24小时共处理 ${episodes.length} 个剧集</div>
-  </div>`;
+  </div>
+${audioUrl ? `  <div class="audio-section">
+    <h2>🎙️ 今日播客速览（语音版）</h2>
+    <div class="audio-meta">约 ${audioDurationMin || 5} 分钟 &nbsp;·&nbsp; 双主持人对话</div>
+    <a href="${escapeHtml(audioUrl)}" class="audio-btn" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;text-decoration:none;border-radius:30px;font-size:15px;font-weight:600;">▶ 点击收听</a>
+  </div>` : ''}`;
 
   // Table of contents
   html += `
@@ -443,7 +455,31 @@ export async function sendDailyDigest(sinceHours: number = 24): Promise<{
     // Generate daily overview summary via LLM
     const dailySummary = await generateDailySummary(episodes, dateStr);
 
-    const html = buildDigestHtml(episodes, dateStr, dailySummary);
+    // Generate daily dialogue audio (two-host podcast style)
+    const episodesInput = episodes.map((ep, i) => {
+      let keyPoints: { title: string; detail: string }[] = [];
+      try { keyPoints = JSON.parse(ep.analysis.key_points || '[]'); } catch {}
+      const kpText = keyPoints.slice(0, 3).map(kp => `  · ${kp.title}`).join('\n');
+      return `【${i + 1}】${ep.podcast.name}：${ep.episode.title}\n${(ep.analysis.summary || '').slice(0, 300)}\n${kpText}`;
+    }).join('\n\n');
+
+    let audioUrl: string | undefined;
+    let audioDurationMin: number | undefined;
+    try {
+      const audioFilename = await generateDailyDialogue(episodesInput, dateStr, episodes.length);
+      if (audioFilename) {
+        const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+          ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+          : 'https://podcast-digest-production.up.railway.app';
+        audioUrl = `${baseUrl}/api/audio/${audioFilename}`;
+        audioDurationMin = estimateAudioDuration(audioFilename);
+        logger.info('Audio generated', { audioUrl, audioDurationMin });
+      }
+    } catch (err) {
+      logger.warn('Audio generation failed, sending email without audio', { error: (err as Error).message });
+    }
+
+    const html = buildDigestHtml(episodes, dateStr, dailySummary, audioUrl, audioDurationMin);
     const subject = `🎧 Podcast Digest - ${dateStr} (${episodes.length}篇新内容)`;
     const from = config.email.fromAddress || config.email.smtpUser || 'Podcast Digest <onboarding@resend.dev>';
 

@@ -1,0 +1,170 @@
+/**
+ * 每日播客对话音频生成
+ * 1. 用 Qwen 生成双主持人对话脚本
+ * 2. 逐行用 CosyVoice TTS 合成（A/B 两个声音）
+ * 3. 拼接 MP3 保存到本地，供 /api/audio/:filename 路由提供下载
+ */
+
+import OpenAI from 'openai';
+import axios from 'axios';
+import fs from 'fs';
+import path from 'path';
+import dayjs from 'dayjs';
+import { config } from '../config';
+import { logger } from '../utils/logger';
+
+// 两位主持人的声音（CosyVoice-v2 内置音色）
+const VOICE_A = 'longxiaochun'; // 女声·温暖
+const VOICE_B = 'longshu';      // 男声·专业
+
+export const AUDIO_DIR = '/tmp/podcast-audio';
+
+interface DialogueLine {
+  speaker: 'A' | 'B';
+  text: string;
+}
+
+// ── 1. 生成对话脚本 ─────────────────────────────────────────────────────────
+
+async function generateScript(episodesInput: string, dateStr: string, count: number): Promise<string> {
+  const client = new OpenAI({
+    apiKey: config.dashscope.apiKey,
+    baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    timeout: 90000,
+  });
+
+  const prompt = `请基于以下${count}个播客剧集的内容，创作一段约5-7分钟的中文播客对话脚本（两位主持人）。
+
+${episodesInput}
+
+输出格式规则（严格遵守，每行一句台词）：
+[A]: 主持人甲的台词
+[B]: 主持人乙的台词
+
+内容要求：
+- 对话自然流畅，像真实播客主持人讨论
+- 覆盖今日各剧集的重要观点和亮点
+- 总字数约1500-2000字
+- 开头简短介绍今日内容，结尾用一句话收尾
+- 直接输出对话，不要任何其他说明文字`;
+
+  const response = await client.chat.completions.create({
+    model: config.dashscope.textModel,
+    messages: [{ role: 'user', content: prompt }],
+    max_tokens: 3000,
+  });
+
+  return response.choices[0]?.message?.content || '';
+}
+
+// ── 2. 解析脚本为逐行结构 ───────────────────────────────────────────────────
+
+function parseScript(script: string): DialogueLine[] {
+  return script
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l.startsWith('[A]:') || l.startsWith('[B]:'))
+    .map(l => {
+      const speaker = l.startsWith('[A]:') ? 'A' : 'B';
+      const text = l.slice(4).trim();
+      return { speaker: speaker as 'A' | 'B', text };
+    })
+    .filter(l => l.text.length > 0);
+}
+
+// ── 3. 单行 TTS 合成（CosyVoice-v2）────────────────────────────────────────
+
+async function synthesize(text: string, voice: string): Promise<Buffer> {
+  const res = await axios.post(
+    'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-to-voice/voice-synthesis',
+    {
+      model: 'cosyvoice-v2',
+      input: { text },
+      parameters: { voice, format: 'mp3', sample_rate: 22050 },
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${config.dashscope.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: 60000,
+    }
+  );
+
+  const audioBase64: string = res.data?.output?.audio;
+  if (!audioBase64) {
+    throw new Error(`CosyVoice no audio field: ${JSON.stringify(res.data).slice(0, 200)}`);
+  }
+  return Buffer.from(audioBase64, 'base64');
+}
+
+// ── 4. 主入口 ───────────────────────────────────────────────────────────────
+
+/**
+ * 生成当日播客对话音频，返回文件名（null 表示失败）
+ */
+export async function generateDailyDialogue(
+  episodesInput: string,
+  dateStr: string,
+  episodeCount: number
+): Promise<string | null> {
+  try {
+    // 4-1. 生成脚本
+    logger.info('Generating dialogue script', { episodeCount });
+    const script = await generateScript(episodesInput, dateStr, episodeCount);
+    if (!script) throw new Error('Empty dialogue script');
+
+    const lines = parseScript(script);
+    logger.info(`Dialogue parsed: ${lines.length} lines`);
+    if (lines.length === 0) throw new Error('No dialogue lines parsed');
+
+    // 4-2. 并发合成（每批3条，避免限流）
+    const BATCH = 3;
+    const buffers: Buffer[] = [];
+
+    for (let i = 0; i < lines.length; i += BATCH) {
+      const batch = lines.slice(i, i + BATCH);
+      const results = await Promise.all(
+        batch.map((line, j) => {
+          const voice = line.speaker === 'A' ? VOICE_A : VOICE_B;
+          logger.info(`TTS ${i + j + 1}/${lines.length} [${line.speaker}]`);
+          return synthesize(line.text, voice).catch(err => {
+            logger.warn(`TTS failed line ${i + j + 1}`, { error: err.message });
+            return Buffer.alloc(0); // 跳过失败行
+          });
+        })
+      );
+      buffers.push(...results);
+    }
+
+    const combined = Buffer.concat(buffers.filter(b => b.length > 0));
+    if (combined.length === 0) throw new Error('All TTS segments failed');
+
+    // 4-3. 保存文件
+    fs.mkdirSync(AUDIO_DIR, { recursive: true });
+    const filename = `digest-${dayjs().format('YYYY-MM-DD')}.mp3`;
+    const filePath = path.join(AUDIO_DIR, filename);
+    fs.writeFileSync(filePath, combined);
+
+    const durationMin = Math.round(combined.length / (32000 / 8) / 60); // 估算时长（32kbps）
+    logger.info('Daily dialogue audio ready', { filename, sizeKB: Math.round(combined.length / 1024), durationMin });
+
+    return filename;
+  } catch (err) {
+    logger.error('generateDailyDialogue failed', { error: (err as Error).message });
+    return null;
+  }
+}
+
+/**
+ * 估算音频时长（分钟）
+ */
+export function estimateAudioDuration(filename: string): number {
+  try {
+    const filePath = path.join(AUDIO_DIR, filename);
+    const size = fs.statSync(filePath).size;
+    return Math.max(1, Math.round(size / (64000 / 8) / 60)); // 估算按64kbps
+  } catch {
+    return 5; // 默认5分钟
+  }
+}
