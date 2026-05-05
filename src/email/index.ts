@@ -99,7 +99,7 @@ async function generateDailySummary(episodes: DigestEpisode[], dateStr: string):
     return `【${i + 1}】${ep.podcast.name}：${ep.episode.title}\n摘要：${summary}\n要点：\n${kpText}`;
   }).join('\n\n---\n\n');
 
-  const prompt = `你是专业播客内容编辑。以下是${dateStr}更新的${episodes.length}个播客剧集内容：\n\n${episodeInputs}\n\n请将以上所有剧集的精华整合成一篇不超过3000字的当日总结。要求：\n1. 按话题/领域归类梳理，不要逐集罗列\n2. 突出最有价值的观点、数据和洞见\n3. 语言流畅，适合快速阅读\n4. 用中文撰写，直接输出正文，不加额外标题`;
+  const prompt = `你是专业播客内容编辑。以下是${dateStr}更新的${episodes.length}个播客剧集内容：\n\n${episodeInputs}\n\n请将以上所有剧集的精华整合成一篇**3500-4000字（绝不超过4000字）**的当日总结。要求：\n1. 按话题/领域归类梳理，不要逐集罗列\n2. 突出最有价值的观点、数据和洞见\n3. 语言流畅，适合快速阅读\n4. 用中文撰写，直接输出正文，不加额外标题\n5. 必须涵盖以上 ${episodes.length} 个剧集的核心内容，不要遗漏任何一集的关键观点`;
 
   // 用快速非推理模型 qwen-plus 生成（比 qwen3.6-plus 快 3-5 倍，更稳定）
   const summaryModel = process.env.DASHSCOPE_SUMMARY_MODEL || 'qwen-plus';
@@ -116,11 +116,11 @@ async function generateDailySummary(episodes: DigestEpisode[], dateStr: string):
 
       logger.info(`Generating daily summary (attempt ${attempt})`, { model: summaryModel, episodes: episodes.length });
 
-      // 180 秒硬超时
+      // 180 秒硬超时；max_tokens 6000 给 4000 中文字符留够余量
       const llmPromise = client.chat.completions.create({
         model: summaryModel,
         messages: [{ role: 'user', content: prompt }],
-        max_tokens: 4000,
+        max_tokens: 6000,
       }).then(r => r.choices[0]?.message?.content || '');
 
       const timeoutPromise = new Promise<string>((_, reject) =>
