@@ -24,7 +24,7 @@ export const AUDIO_DIR = process.env.AUDIO_DIR
 
 // ── 1. 生成单人播报脚本 ─────────────────────────────────────────────────────
 
-async function generateScript(episodesInput: string, count: number): Promise<string> {
+async function generateScript(episodesInput: string, count: number, onStage?: (s: string) => void): Promise<string> {
   const client = new OpenAI({
     apiKey: config.dashscope.apiKey,
     baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
@@ -33,41 +33,73 @@ async function generateScript(episodesInput: string, count: number): Promise<str
   });
   const scriptModel = process.env.DASHSCOPE_SCRIPT_MODEL || 'qwen-plus';
 
-  const prompt = `请基于以下 ${count} 个播客剧集的内容，撰写一段**约30分钟的中文播客播报文稿**（单人主持口吻）。
+  // 把剧集分成前后两半，分两次 LLM 调用各生成 ~6500 字（避免 qwen-plus 8K token 输出上限）
+  const halfBoundary = Math.ceil(count / 2);
+  // episodesInput 用 '---' 分隔，按这个切
+  const segments = episodesInput.split(/\n\n---\n\n/);
+  const part1Episodes = segments.slice(0, halfBoundary).join('\n\n---\n\n');
+  const part2Episodes = segments.slice(halfBoundary).join('\n\n---\n\n');
 
-${episodesInput}
+  const buildPrompt = (part: 'first' | 'second', episodes: string, partCount: number) => {
+    if (part === 'first') {
+      return `请基于以下 ${partCount} 个播客剧集的内容，撰写**中文播客播报文稿的前半部分**（单人主持口吻）。
+
+${episodes}
 
 【硬性要求】
-1. **总字数必须在 12000-14000 字之间**（TTS 朗读约 440 字/分钟，13000 字 = 30 分钟）。少于 12000 字算不合格。
-2. **必须涵盖以上 ${count} 个剧集的全部内容**，每个剧集都要单独成段展开，不可遗漏任何一集。
+- **本段总字数 6500-7500 字**
+- 必须涵盖以上 ${partCount} 个剧集的内容，每集独立成段，约 ${Math.floor(6500 / partCount)} 字
+- 包含开场白（约200字介绍今日内容概况），不要写结尾（后半部分会续写）
+- 像电台主持人朗读早间新闻精选，自然流畅
+- 使用过渡词："接下来"、"另一方面"、"值得一提的是"
+- **直接输出正文**，不要任何标题、markdown、列表符号
+- 不要 [A]:、[B]: 标记，连贯散文
+- 标点正常便于朗读
 
-【结构要求】
-- 开场 400 字：介绍今日内容概况、今日重点话题、整体主线
-- 中段（${count} 段，每段 ${Math.floor(11000 / count)}-${Math.floor(13000 / count)} 字）：每个剧集独立成段，深入展开
-  - 每段必须包括：剧集名 + 嘉宾/话题、核心观点、关键数据/事实、有趣细节、值得引用的原话或案例
-- 结尾 400 字：回顾全天精华 + 鼓励性结束语
+请开始撰写前半部分：`;
+    } else {
+      return `请基于以下 ${partCount} 个播客剧集的内容，续写**中文播客播报文稿的后半部分**（单人主持口吻，承接前半部分）。
 
-【风格要求】
-- 像电台主持人朗读早间新闻精选，自然流畅的口语化播报
-- 使用过渡词："接下来"、"另一方面"、"值得一提的是"、"切换话题"、"我们再看一个例子"
-- **直接输出正文**，不要任何标题、markdown、列表符号、说明文字
-- 不要有 [A]:、[B]: 之类的标记，全篇连贯散文
-- 标点正常使用，便于朗读断句
+${episodes}
 
-请开始撰写（确保字数 12000-14000 之间，覆盖全部 ${count} 个剧集）：`;
+【硬性要求】
+- **本段总字数 6500-7500 字**
+- 必须涵盖以上 ${partCount} 个剧集的内容，每集独立成段，约 ${Math.floor(6500 / partCount)} 字
+- 开头用过渡句承接前半（如"接下来我们看……"），不要重复开场介绍
+- 包含结尾（约200字总结今日全天精华+鼓励性结束语）
+- 像电台主持人朗读早间新闻精选，自然流畅
+- **直接输出正文**，不要任何标题、markdown、列表符号
+- 不要 [A]:、[B]: 标记，连贯散文
+- 标点正常便于朗读
 
-  logger.info(`Generating script with model=${scriptModel}, max_tokens=20000, target 13000 chars`);
-  const llmPromise = client.chat.completions.create({
-    model: scriptModel,
-    messages: [{ role: 'user', content: prompt }],
-    max_tokens: 20000,
-  }).then(r => r.choices[0]?.message?.content || '');
+请开始撰写后半部分：`;
+    }
+  };
 
-  const timeoutPromise = new Promise<string>((_, reject) =>
-    setTimeout(() => reject(new Error('script LLM hard timeout 360s')), 360000)
-  );
+  const callOnce = async (prompt: string, label: string): Promise<string> => {
+    logger.info(`Generating script ${label} with ${scriptModel}`);
+    const llmPromise = client.chat.completions.create({
+      model: scriptModel,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 8000,
+    }).then(r => r.choices[0]?.message?.content || '');
+    const timeoutPromise = new Promise<string>((_, reject) =>
+      setTimeout(() => reject(new Error(`script ${label} hard timeout 240s`)), 240000)
+    );
+    return Promise.race([llmPromise, timeoutPromise]);
+  };
 
-  return Promise.race([llmPromise, timeoutPromise]);
+  onStage?.('script_part1_generating');
+  const part1 = await callOnce(buildPrompt('first', part1Episodes, halfBoundary), 'part1');
+  onStage?.(`script_part1_done (${part1.length} chars)`);
+
+  onStage?.('script_part2_generating');
+  const part2 = await callOnce(buildPrompt('second', part2Episodes, count - halfBoundary), 'part2');
+  onStage?.(`script_part2_done (${part2.length} chars)`);
+
+  const combined = part1 + '\n\n' + part2;
+  logger.info(`Script combined: ${part1.length} + ${part2.length} = ${combined.length} chars`);
+  return combined;
 }
 
 // ── 2. 按句号切成大块 ────────────────────────────────────────────────────────
@@ -106,7 +138,7 @@ function chunkScript(script: string, maxChars: number = MAX_CHARS_PER_TTS): stri
 
 async function synthesizeOnce(text: string, voice: string = VOICE): Promise<Buffer> {
   const callPromise = (async () => {
-    // 合成本身可能需要 60-120 秒（处理时间 ∝ 文本长度）
+    // 合成本身可能需要 60-120 秒（处理时间 ∝ 文本长度），正常语速朗读
     const res = await axios.post(
       'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
       {
@@ -118,7 +150,7 @@ async function synthesizeOnce(text: string, voice: string = VOICE): Promise<Buff
           Authorization: `Bearer ${config.dashscope.apiKey}`,
           'Content-Type': 'application/json',
         },
-        timeout: 180000,  // 3 分钟，足够长文本合成
+        timeout: 180000,
       }
     );
     const audioUrl: string | undefined =
@@ -167,12 +199,12 @@ export async function generateDailyDialogue(
 ): Promise<string | null> {
   const stage = (s: string) => onStage?.(s);
 
-  // 4-1. 生成脚本
+  // 4-1. 生成脚本（分两段：每段 ~6500 字，合计 ~13000 字 = 30 分钟音频）
   stage('script_generating');
-  logger.info('Generating narration script', { episodeCount });
-  const script = await generateScript(episodesInput, episodeCount);
-  if (!script || script.length < 500) {
-    throw new Error(`脚本太短或为空: length=${script?.length || 0}`);
+  logger.info('Generating narration script (2-part)', { episodeCount });
+  const script = await generateScript(episodesInput, episodeCount, onStage);
+  if (!script || script.length < 5000) {
+    throw new Error(`脚本太短: length=${script?.length || 0}`);
   }
   stage(`script_done (${script.length} chars)`);
   logger.info(`Script generated: ${script.length} chars`);
