@@ -13,9 +13,9 @@ import dayjs from 'dayjs';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 
-// 两位主持人的声音（CosyVoice-v2 内置音色）
-const VOICE_A = 'longxiaochun'; // 女声·温暖
-const VOICE_B = 'longshu';      // 男声·专业
+// 两位主持人的声音（Sambert 模型 - 同步 TTS 接口）
+const VOICE_A = 'sambert-zhinan-v1';  // 女声 - 柔和（主持人甲）
+const VOICE_B = 'sambert-zhichu-v1';  // 男声 - 沉稳（主持人乙）
 
 export const AUDIO_DIR = '/tmp/podcast-audio';
 
@@ -79,12 +79,13 @@ function parseScript(script: string): DialogueLine[] {
 
 async function synthesize(text: string, voice: string, attempt = 1): Promise<Buffer> {
   try {
+    // Sambert 同步 TTS：POST /api/v1/services/audio/tts，响应是 audio/mpeg 二进制流
     const res = await axios.post(
-      'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-to-voice/voice-synthesis',
+      'https://dashscope.aliyuncs.com/api/v1/services/audio/tts',
       {
-        model: 'cosyvoice-v2',
+        model: voice,  // sambert-zhinan-v1 / sambert-zhichu-v1 等
         input: { text },
-        parameters: { voice, format: 'mp3', sample_rate: 22050 },
+        parameters: { format: 'mp3', sample_rate: 16000, volume: 50, rate: 1.0, pitch: 1.0 },
       },
       {
         headers: {
@@ -92,16 +93,18 @@ async function synthesize(text: string, voice: string, attempt = 1): Promise<Buf
           'Content-Type': 'application/json',
         },
         timeout: 60000,
+        responseType: 'arraybuffer',
       }
     );
 
-    const audioBase64: string = res.data?.output?.audio;
-    if (!audioBase64) {
-      throw new Error(`CosyVoice no audio field: ${JSON.stringify(res.data).slice(0, 200)}`);
+    const buf = Buffer.from(res.data);
+    // 如果返回的是 JSON 错误（不是音频），第一个字节通常是 '{'
+    if (buf.length < 100 || buf[0] === 0x7B) {
+      const txt = buf.toString('utf-8').slice(0, 300);
+      throw new Error(`Sambert returned non-audio: ${txt}`);
     }
-    return Buffer.from(audioBase64, 'base64');
+    return buf;
   } catch (err: any) {
-    // 429 限流 / 5xx 错误时重试 2 次（指数退避）
     const status = err.response?.status;
     if ((status === 429 || (status >= 500 && status < 600)) && attempt < 3) {
       const delay = 1500 * Math.pow(2, attempt - 1);
@@ -109,7 +112,15 @@ async function synthesize(text: string, voice: string, attempt = 1): Promise<Buf
       await new Promise(r => setTimeout(r, delay));
       return synthesize(text, voice, attempt + 1);
     }
-    throw new Error(`CosyVoice ${status || 'network'}: ${err.response?.data?.message || err.message}`);
+    // 解析二进制错误响应中的 JSON 信息
+    let errMsg = err.message;
+    if (err.response?.data) {
+      try {
+        const txt = Buffer.from(err.response.data).toString('utf-8').slice(0, 300);
+        errMsg = `${status} ${txt}`;
+      } catch {}
+    }
+    throw new Error(`Sambert ${status || 'network'}: ${errMsg}`);
   }
 }
 
