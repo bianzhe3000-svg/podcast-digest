@@ -33,7 +33,7 @@ async function generateScript(episodesInput: string, dateStr: string, count: num
     timeout: 90000,
   });
 
-  const prompt = `请基于以下${count}个播客剧集的内容，创作一段约8分钟的中文播客对话脚本（两位主持人）。
+  const prompt = `请基于以下${count}个播客剧集的内容，创作一段约30分钟的中文播客对话脚本（两位主持人）。
 
 ${episodesInput}
 
@@ -42,18 +42,20 @@ ${episodesInput}
 [B]: 主持人乙的台词
 
 内容要求：
-- 对话自然流畅，覆盖今日每个剧集的核心亮点
-- 中文语速约220字/分钟，8分钟需要约1700字脚本，请确保总字数在1500-1800字
-- 每个剧集 1-2 轮对话简明带过
-- 开头介绍（约80字），结尾总结（约80字）
-- 每行台词不超过60字（便于TTS合成）
-- 总行数控制在 30-40 行
+- 对话自然流畅，像真实播客主持人深度讨论
+- 深入覆盖每个剧集的重要观点、有趣细节和亮点
+- 中文语速约220字/分钟，30分钟需要约6600字脚本，请确保总字数在6000-7000字
+- 每个剧集至少用 3-5 轮对话深入展开
+- 主持人之间有互动、追问、补充，不是单纯转述
+- 开头介绍今日内容概况（约200字），结尾总结（约200字）
+- 每行台词控制在 40-80 字（便于TTS合成与节奏感）
+- 总行数控制在 100-150 行
 - 直接输出对话，不要任何其他说明文字`;
 
   const response = await client.chat.completions.create({
     model: config.dashscope.textModel,
     messages: [{ role: 'user', content: prompt }],
-    max_tokens: 4000,
+    max_tokens: 12000,
   });
 
   return response.choices[0]?.message?.content || '';
@@ -161,33 +163,52 @@ export async function generateDailyDialogue(
     logger.info(`Dialogue parsed: ${lines.length} lines`);
     if (lines.length === 0) throw new Error('No dialogue lines parsed');
 
-    // 4-2. 串行合成（避免 Qwen-TTS 的并发限流）
+    // 4-2. 小批量并发合成（每批 2 条，控制总时长在 ~10 分钟内完成 100+ 行）
+    // 经验值：Qwen3-TTS-Flash 单次调用约 3-5 秒，2 并发不会触发限流
+    const BATCH = 2;
+    const BATCH_DELAY_MS = 150;
     const buffers: Buffer[] = [];
     let successCount = 0;
     let failCount = 0;
     let lastError = '';
 
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const voice = line.speaker === 'A' ? VOICE_A : VOICE_B;
-      try {
-        const buf = await synthesize(line.text, voice);
-        buffers.push(buf);
-        successCount++;
-        if ((i + 1) % 5 === 0) logger.info(`TTS progress: ${i + 1}/${lines.length} (success=${successCount}, fail=${failCount})`);
-      } catch (err) {
-        failCount++;
-        lastError = (err as Error).message;
-        logger.warn(`TTS failed line ${i + 1}/${lines.length}`, { error: lastError, text: line.text.slice(0, 40) });
+    for (let i = 0; i < lines.length; i += BATCH) {
+      const batch = lines.slice(i, i + BATCH);
+      const results = await Promise.all(
+        batch.map(async (line) => {
+          const voice = line.speaker === 'A' ? VOICE_A : VOICE_B;
+          try {
+            const buf = await synthesize(line.text, voice);
+            return { ok: true as const, buf };
+          } catch (err) {
+            return { ok: false as const, error: (err as Error).message, text: line.text };
+          }
+        })
+      );
+      for (const r of results) {
+        if (r.ok) {
+          buffers.push(r.buf);
+          successCount++;
+        } else {
+          failCount++;
+          lastError = r.error;
+          logger.warn(`TTS failed`, { error: r.error, text: r.text.slice(0, 40) });
+        }
       }
-      // 节流：每条间隔 200ms
-      await new Promise(r => setTimeout(r, 200));
+      if ((i / BATCH) % 5 === 0) {
+        logger.info(`TTS progress ${i + batch.length}/${lines.length} (ok=${successCount}, fail=${failCount})`);
+      }
+      // 节流：批次之间小停顿
+      await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
     }
 
     const combined = Buffer.concat(buffers);
     logger.info(`TTS done: ${successCount} ok, ${failCount} failed, totalBytes=${combined.length}`);
     if (combined.length === 0) {
       throw new Error(`All ${lines.length} TTS segments failed. Last error: ${lastError}`);
+    }
+    if (failCount > lines.length * 0.3) {
+      logger.warn(`TTS partial: ${failCount}/${lines.length} failed (>30%)`);
     }
 
     // 4-3. 保存文件
