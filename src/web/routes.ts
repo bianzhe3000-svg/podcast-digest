@@ -661,15 +661,19 @@ router.post('/email/test-connection', async (_req: Request, res: Response) => {
   }
 });
 
-router.post('/email/send-digest', async (req: Request, res: Response) => {
-  try {
-    // 支持自定义时间窗口，默认24小时
-    const sinceHours = parseInt(String(req.query.hours || req.body?.hours || ''), 10) || 24;
-    const result = await sendDailyDigest(sinceHours);
-    res.json({ success: true, data: result });
-  } catch (error) {
-    res.status(500).json({ success: false, error: (error as Error).message });
-  }
+router.post('/email/send-digest', (req: Request, res: Response) => {
+  // 支持自定义时间窗口，默认24小时
+  const sinceHours = parseInt(String(req.query.hours || req.body?.hours || ''), 10) || 24;
+
+  // 立即返回，避免 Railway 代理 30s 超时（生成摘要+PDF 耗时较长）
+  res.json({ success: true, data: { message: '邮件发送任务已启动（后台处理）', sinceHours } });
+
+  // 后台异步执行
+  sendDailyDigest(sinceHours).then(result => {
+    logger.info('send-digest completed', result);
+  }).catch(err => {
+    logger.error('send-digest failed', { error: (err as Error).message });
+  });
 });
 
 // === Settings (non-sensitive) ===
