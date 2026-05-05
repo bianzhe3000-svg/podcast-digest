@@ -481,14 +481,10 @@ const App = {
   },
 
   async sendTestDigest() {
-    this.toast('正在发送邮件摘要...', 'info');
+    this.toast('邮件摘要任务已启动（后台生成中，约需2-3分钟）...', 'info');
     try {
       const result = await this.api('/email/send-digest', { method: 'POST' });
-      if (result.sent) {
-        this.toast(`邮件发送成功！包含 ${result.episodeCount} 个剧集`, 'success');
-      } else {
-        this.toast(`发送失败: ${result.error}`, 'error');
-      }
+      this.toast(result.message || '邮件发送任务已在后台启动，完成后请刷新每日摘要页面', 'success');
     } catch (e) { /* handled */ }
   },
 
