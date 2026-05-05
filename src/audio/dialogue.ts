@@ -11,8 +11,13 @@ import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import dayjs from 'dayjs';
+import utc from 'dayjs/plugin/utc';
+import timezone from 'dayjs/plugin/timezone';
 import { config } from '../config';
 import { logger } from '../utils/logger';
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 // 音色（Qwen3-TTS-Flash 内置）
 const VOICE = 'Cherry';                   // 女声·阳光
@@ -273,9 +278,9 @@ export async function generateDailyDialogue(
     throw new Error(`Too many TTS failures: only ${okCount}/${chunks.length} succeeded`);
   }
 
-  // 4-4. 保存到持久化 Volume
+  // 4-4. 保存到持久化 Volume（使用 Asia/Shanghai 时区命名）
   fs.mkdirSync(AUDIO_DIR, { recursive: true });
-  const filename = `digest-${dayjs().format('YYYY-MM-DD')}.mp3`;
+  const filename = `digest-${dayjs().tz('Asia/Shanghai').format('YYYY-MM-DD')}.mp3`;
   const filePath = path.join(AUDIO_DIR, filename);
   fs.writeFileSync(filePath, combined);
   logger.info('Audio saved', { filename, sizeKB: Math.round(combined.length / 1024) });
