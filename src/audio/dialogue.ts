@@ -13,9 +13,9 @@ import dayjs from 'dayjs';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 
-// 两位主持人的声音（DashScope Sambert 同步 TTS）
-const VOICE_A = 'sambert-zhinan-v1';  // 女声·柔和（主持人甲）
-const VOICE_B = 'sambert-zhichu-v1';  // 男声·沉稳（主持人乙）
+// 两位主持人的声音（Qwen3-TTS-Flash 内置音色）
+const VOICE_A = 'Cherry'; // 女声·阳光（主持人甲）
+const VOICE_B = 'Ethan';  // 男声·温暖（主持人乙）
 
 export const AUDIO_DIR = '/tmp/podcast-audio';
 
@@ -79,14 +79,16 @@ function parseScript(script: string): DialogueLine[] {
 
 async function synthesize(text: string, voice: string, attempt = 1): Promise<Buffer> {
   try {
-    // DashScope Sambert 同步 TTS：/services/audio/tts/SpeechSynthesizer/call
-    // 响应是 audio/mpeg 二进制流
+    // Qwen3-TTS-Flash：通过 multimodal-generation/generation endpoint，返回 audio URL
     const res = await axios.post(
-      'https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer/call',
+      'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
       {
-        model: voice,  // sambert-zhinan-v1 / sambert-zhichu-v1
-        input: { text },
-        parameters: { format: 'mp3', sample_rate: 16000, volume: 50, rate: 1.0, pitch: 1.0 },
+        model: 'qwen3-tts-flash',
+        input: {
+          text,
+          voice,            // Cherry / Ethan / Serena / Chelsie / Moon / 等
+          language_type: 'Chinese',
+        },
       },
       {
         headers: {
@@ -94,17 +96,21 @@ async function synthesize(text: string, voice: string, attempt = 1): Promise<Buf
           'Content-Type': 'application/json',
         },
         timeout: 60000,
-        responseType: 'arraybuffer',
       }
     );
 
-    const buf = Buffer.from(res.data);
-    // 如果返回 JSON 错误（不是音频），通常以 '{' 开头
-    if (buf.length < 200 || buf[0] === 0x7B) {
-      const txt = buf.toString('utf-8').slice(0, 300);
-      throw new Error(`Sambert non-audio response: ${txt}`);
+    const audioUrl: string | undefined =
+      res.data?.output?.audio?.url ||
+      res.data?.output?.audio_url ||
+      res.data?.output?.results?.[0]?.audio?.url;
+
+    if (!audioUrl) {
+      throw new Error(`No audio URL in response: ${JSON.stringify(res.data).slice(0, 300)}`);
     }
-    return buf;
+
+    // 下载音频文件
+    const dl = await axios.get(audioUrl, { responseType: 'arraybuffer', timeout: 30000 });
+    return Buffer.from(dl.data);
   } catch (err: any) {
     const status = err.response?.status;
     if ((status === 429 || (status >= 500 && status < 600)) && attempt < 3) {
@@ -116,15 +122,13 @@ async function synthesize(text: string, voice: string, attempt = 1): Promise<Buf
     let errMsg = err.message;
     if (err.response?.data) {
       try {
-        const txt = Buffer.isBuffer(err.response.data)
-          ? Buffer.from(err.response.data).toString('utf-8')
-          : typeof err.response.data === 'string'
-            ? err.response.data
-            : JSON.stringify(err.response.data);
+        const txt = typeof err.response.data === 'string'
+          ? err.response.data
+          : JSON.stringify(err.response.data);
         errMsg = `${status} ${txt.slice(0, 300)}`;
       } catch {}
     }
-    throw new Error(`Sambert ${status || 'network'}: ${errMsg}`);
+    throw new Error(`Qwen-TTS ${status || 'network'}: ${errMsg}`);
   }
 }
 
