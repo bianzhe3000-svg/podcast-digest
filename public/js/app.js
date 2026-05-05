@@ -566,14 +566,18 @@ const App = {
         <span class="digest-ep-count-badge">${data.episodeCount} 个剧集</span>
       </div>`;
 
-      // Audio player
+      // Audio player (or placeholder if generation failed)
       if (data.audioUrl) {
         html += `<div class="digest-audio-section">
-          <div class="digest-audio-label">🎙️ 今日播客对话（双主持人，约30分钟）</div>
+          <div class="digest-audio-label">🎙️ 今日播客对话（双主持人，约15分钟）</div>
           <audio controls preload="none" style="width:100%;height:40px;display:block;">
             <source src="${data.audioUrl}" type="audio/mpeg">
             您的浏览器不支持音频播放
           </audio>
+        </div>`;
+      } else {
+        html += `<div class="digest-audio-section" style="background:#374151;">
+          <div class="digest-audio-label" style="margin-bottom:0;">🔇 今日音频版本暂不可用（TTS 服务调试中），文字版摘要见下方</div>
         </div>`;
       }
 

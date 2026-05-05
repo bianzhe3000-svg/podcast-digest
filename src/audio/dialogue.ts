@@ -79,12 +79,15 @@ function parseScript(script: string): DialogueLine[] {
 
 async function synthesize(text: string, voice: string, attempt = 1): Promise<Buffer> {
   try {
-    // 使用 CosyVoice 异步 TTS（DashScope 标准异步 API）
-    // 1. 创建任务
+    // 使用 DashScope CosyVoice 异步 TTS API
+    // 1. 创建任务（需要 task_group/task/function 字段）
     const submitRes = await axios.post(
       'https://dashscope.aliyuncs.com/api/v1/services/audio/tts',
       {
         model: 'cosyvoice-v1',
+        task_group: 'audio',
+        task: 'tts',
+        function: 'SpeechSynthesizer',
         input: { text },
         parameters: { voice, format: 'mp3', sample_rate: 22050, volume: 50, rate: 1.0, pitch: 1.0 },
       },
