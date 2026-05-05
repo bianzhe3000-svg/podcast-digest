@@ -33,7 +33,8 @@ async function generateScript(episodesInput: string, dateStr: string, count: num
   const client = new OpenAI({
     apiKey: config.dashscope.apiKey,
     baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    timeout: 90000,
+    timeout: 180000,
+    maxRetries: 0,  // 不要 SDK 内部重试
   });
 
   const prompt = `请基于以下${count}个播客剧集的内容，创作一段约30分钟的中文播客对话脚本（两位主持人）。
@@ -55,12 +56,22 @@ ${episodesInput}
 - 总行数控制在 100-150 行
 - 直接输出对话，不要任何其他说明文字`;
 
-  const response = await client.chat.completions.create({
-    model: config.dashscope.textModel,
-    messages: [{ role: 'user', content: prompt }],
-    max_tokens: 12000,
-  });
-
+  // 显式 AbortController 兜底（180s）
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 180000);
+  let response;
+  try {
+    response = await client.chat.completions.create(
+      {
+        model: config.dashscope.textModel,
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 12000,
+      },
+      { signal: ac.signal }
+    );
+  } finally {
+    clearTimeout(timer);
+  }
   return response.choices[0]?.message?.content || '';
 }
 

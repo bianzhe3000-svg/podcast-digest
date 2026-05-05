@@ -106,15 +106,27 @@ async function generateDailySummary(episodes: DigestEpisode[], dateStr: string):
       apiKey: config.dashscope.apiKey,
       baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
       timeout: 120000,
+      maxRetries: 0,  // 不要 SDK 内部重试，超时立即失败
     });
 
     logger.info('Generating daily summary via DashScope', { model: config.dashscope.textModel, episodes: episodes.length });
 
-    const response = await client.chat.completions.create({
-      model: config.dashscope.textModel,
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 4000,
-    });
+    // 显式 AbortController 兜底超时（90秒），避免 SDK timeout 不生效
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 90000);
+    let response;
+    try {
+      response = await client.chat.completions.create(
+        {
+          model: config.dashscope.textModel,
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 4000,
+        },
+        { signal: ac.signal }
+      );
+    } finally {
+      clearTimeout(timer);
+    }
 
     const text = response.choices[0]?.message?.content || '';
     logger.info('Daily summary generated', { length: text.length });
