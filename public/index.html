@@ -24,6 +24,9 @@
         <li class="nav-item" data-page="documents">
           <span class="nav-icon">📄</span> 文档浏览
         </li>
+        <li class="nav-item" data-page="digest">
+          <span class="nav-icon">📅</span> 每日摘要
+        </li>
         <li class="nav-item" data-page="scheduler">
           <span class="nav-icon">⏰</span> 定时任务
         </li>
@@ -91,6 +94,21 @@
           <div class="doc-sidebar" id="doc-sidebar">加载中...</div>
           <div class="doc-viewer" id="doc-viewer">
             <div class="empty-state">选择左侧文档进行预览</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Daily Digest -->
+      <div class="page" id="page-digest">
+        <div class="digest-layout">
+          <!-- Date list sidebar -->
+          <div class="digest-date-sidebar">
+            <div class="digest-date-header">📅 历史摘要</div>
+            <div id="digest-date-list"><div style="padding:16px;color:#94a3b8;font-size:13px;">加载中...</div></div>
+          </div>
+          <!-- Main content -->
+          <div class="digest-main" id="digest-main">
+            <div class="empty-state">← 选择左侧日期查看每日摘要</div>
           </div>
         </div>
       </div>

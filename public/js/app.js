@@ -1,5 +1,6 @@
 const App = {
   currentPage: 'dashboard',
+  _digestState: { date: null, history: [] },
 
   // === Navigation ===
   navigateTo(page) {
@@ -18,6 +19,7 @@ const App = {
       case 'dashboard': this.loadDashboard(); break;
       case 'podcasts': this.loadPodcasts(); break;
       case 'documents': this.loadDocuments(); break;
+      case 'digest': this.loadDigest(); break;
       case 'scheduler': this.loadSchedulerStatus(); break;
       case 'logs': this.loadLogs(); break;
       case 'settings': this.loadSettings(); break;
@@ -517,6 +519,212 @@ const App = {
         <p style="margin-top:16px;font-size:12px;color:#94a3b8;">修改设置请编辑项目根目录下的 .env 文件并重启服务</p>
       `;
     } catch (e) { /* handled */ }
+  },
+
+  // === Daily Digest ===
+  async loadDigest() {
+    this._digestState = { date: null, history: [] };
+    try {
+      const list = await this.api('/digest/list');
+      const container = document.getElementById('digest-date-list');
+
+      if (!list || list.length === 0) {
+        container.innerHTML = '<div style="padding:16px;color:#94a3b8;font-size:13px;text-align:center;">暂无摘要<br>请先发送邮件生成</div>';
+        return;
+      }
+
+      container.innerHTML = list.map(item => `
+        <div class="digest-date-item" data-date="${item.date}" onclick="App.selectDigestDate('${item.date}')">
+          <div class="digest-date-text">${item.date}</div>
+          <div class="digest-date-badges">
+            ${item.has_summary ? '📋' : ''}${item.has_audio ? ' 🎙️' : ''}
+          </div>
+        </div>
+      `).join('');
+
+      // Auto-select the most recent date
+      if (list.length > 0) this.selectDigestDate(list[0].date);
+    } catch (e) { /* handled */ }
+  },
+
+  async selectDigestDate(date) {
+    const main = document.getElementById('digest-main');
+    main.innerHTML = '<div class="empty-state">加载中...</div>';
+
+    // Highlight selected date
+    document.querySelectorAll('.digest-date-item').forEach(el => el.classList.remove('active'));
+    document.querySelector(`.digest-date-item[data-date="${date}"]`)?.classList.add('active');
+
+    this._digestState = { date, history: [] };
+
+    try {
+      const data = await this.api(`/digest/${date}`);
+
+      let html = '<div class="digest-content-inner">';
+
+      // Header
+      html += `<div class="digest-content-header">
+        <h2>📰 ${date}</h2>
+        <span class="digest-ep-count-badge">${data.episodeCount} 个剧集</span>
+      </div>`;
+
+      // Audio player
+      if (data.audioUrl) {
+        html += `<div class="digest-audio-section">
+          <div class="digest-audio-label">🎙️ 今日播客对话（双主持人，约30分钟）</div>
+          <audio controls preload="none" style="width:100%;height:40px;display:block;">
+            <source src="${data.audioUrl}" type="audio/mpeg">
+            您的浏览器不支持音频播放
+          </audio>
+        </div>`;
+      }
+
+      // 今日全览
+      if (data.summary) {
+        html += `<div class="digest-section">
+          <div class="digest-section-title">📋 今日全览</div>
+          <div class="digest-summary-text">${this.escapeHtml(data.summary)}</div>
+        </div>`;
+      }
+
+      // Episodes accordion
+      if (data.episodes && data.episodes.length > 0) {
+        html += `<div class="digest-section">
+          <div class="digest-section-title">🎧 剧集详情（${data.episodes.length} 集）</div>`;
+
+        data.episodes.forEach((ep, idx) => {
+          const duration = ep.durationSeconds ? Math.round(ep.durationSeconds / 60) + ' 分钟' : '';
+          const kpItems = (ep.keyPoints || []).map(kp =>
+            `<li><strong>${this.escapeHtml(kp.title)}</strong>${kp.detail ? ': ' + this.escapeHtml(kp.detail) : ''}</li>`
+          ).join('');
+          const kwSpans = (ep.keywords || []).map(kw =>
+            `<span class="digest-keyword">${this.escapeHtml(kw.word || kw)}</span>`
+          ).join('');
+
+          html += `<div class="digest-episode">
+            <div class="digest-episode-header" onclick="App.toggleDigestEpisode(${idx})">
+              <div class="digest-episode-title">
+                <span class="digest-episode-num">${idx + 1}</span>
+                <div>
+                  <div class="digest-ep-name">${this.escapeHtml(ep.title)}</div>
+                  <div class="digest-ep-meta">${this.escapeHtml(ep.podcastName)}${duration ? ' · ' + duration : ''}</div>
+                </div>
+              </div>
+              <span class="digest-episode-toggle" id="dtoggle-${idx}">▼</span>
+            </div>
+            <div class="digest-episode-body" id="dbody-${idx}" style="display:none">
+              ${ep.summary ? `<div class="digest-ep-section">
+                <div class="digest-ep-section-title">摘要</div>
+                <div class="digest-ep-text">${this.escapeHtml(ep.summary)}</div>
+              </div>` : ''}
+              ${kpItems ? `<div class="digest-ep-section">
+                <div class="digest-ep-section-title">要点</div>
+                <ul class="digest-kp-list">${kpItems}</ul>
+              </div>` : ''}
+              ${kwSpans ? `<div class="digest-ep-section">
+                <div class="digest-ep-section-title">关键词</div>
+                <div class="digest-keywords">${kwSpans}</div>
+              </div>` : ''}
+              ${ep.fullRecap ? `<div class="digest-ep-section">
+                <div class="digest-ep-section-title">详细纪要</div>
+                <div class="digest-ep-text">${this.escapeHtml(ep.fullRecap)}</div>
+              </div>` : ''}
+            </div>
+          </div>`;
+        });
+
+        html += '</div>'; // end episodes section
+      }
+
+      // Chat interface
+      html += `<div class="digest-section">
+        <div class="digest-section-title">💬 内容问答</div>
+        <div class="digest-chat">
+          <div class="chat-messages" id="chat-messages">
+            <div class="chat-welcome">我可以回答关于 <strong>${date}</strong> 播客内容的任何问题 💡<br>例如："今天哪个剧集最值得听？" 或 "总结一下某某话题"</div>
+          </div>
+          <div class="chat-input-row">
+            <input type="text" id="chat-input" class="chat-input"
+              placeholder="输入关于今日内容的问题，按 Enter 发送..."
+              onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();App.sendDigestChat();}">
+            <button class="btn btn-primary" onclick="App.sendDigestChat()">发送</button>
+          </div>
+        </div>
+      </div>`;
+
+      html += '</div>'; // digest-content-inner
+      main.innerHTML = html;
+
+    } catch (e) {
+      main.innerHTML = '<div class="empty-state">加载失败，请重试</div>';
+    }
+  },
+
+  toggleDigestEpisode(idx) {
+    const body = document.getElementById(`dbody-${idx}`);
+    const toggle = document.getElementById(`dtoggle-${idx}`);
+    if (!body) return;
+    const isOpen = body.style.display !== 'none';
+    body.style.display = isOpen ? 'none' : 'block';
+    if (toggle) toggle.textContent = isOpen ? '▼' : '▲';
+  },
+
+  async sendDigestChat() {
+    const input = document.getElementById('chat-input');
+    const messagesEl = document.getElementById('chat-messages');
+    if (!input || !messagesEl) return;
+
+    const message = input.value.trim();
+    if (!message) return;
+
+    const { date, history } = this._digestState;
+    if (!date) { this.toast('请先选择日期', 'error'); return; }
+
+    input.value = '';
+    input.disabled = true;
+
+    // Append user bubble
+    const userDiv = document.createElement('div');
+    userDiv.className = 'chat-message chat-message-user';
+    userDiv.textContent = message;
+    messagesEl.appendChild(userDiv);
+
+    // Thinking indicator
+    const thinkingDiv = document.createElement('div');
+    thinkingDiv.className = 'chat-message chat-message-thinking';
+    thinkingDiv.textContent = '思考中...';
+    messagesEl.appendChild(thinkingDiv);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+
+    try {
+      const result = await this.api('/digest/chat', {
+        method: 'POST',
+        body: { date, message, history },
+      });
+
+      thinkingDiv.remove();
+
+      const assistantDiv = document.createElement('div');
+      assistantDiv.className = 'chat-message chat-message-assistant';
+      assistantDiv.textContent = result.reply;
+      messagesEl.appendChild(assistantDiv);
+
+      // Update history, cap at 20 entries (10 exchanges)
+      history.push({ role: 'user', content: message });
+      history.push({ role: 'assistant', content: result.reply });
+      if (history.length > 20) history.splice(0, history.length - 20);
+
+    } catch (e) {
+      thinkingDiv.remove();
+      const errDiv = document.createElement('div');
+      errDiv.className = 'chat-message chat-message-thinking';
+      errDiv.textContent = '抱歉，请求失败，请稍后重试';
+      messagesEl.appendChild(errDiv);
+    }
+
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    input.disabled = false;
+    input.focus();
   },
 
   // === Utilities ===
