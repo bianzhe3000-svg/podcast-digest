@@ -307,20 +307,35 @@ export async function generateDigestPdf(episodes: PdfEpisodeData[], dateStr: str
     const destName = `ep-${i}`;
     const pubDate = ep.publishedAt ? ep.publishedAt.substring(0, 10) : '';
 
-    checkPageBreak(doc, 30);
+    checkPageBreak(doc, 48);
 
-    // 播客名 + 剧集标题（可点击跳转）
+    // 剧集标题（带下划线超链接）
     doc.font(fontBold).fontSize(10.5).fillColor('#667eea');
     doc.text(`${i + 1}. ${ep.episodeTitle}`, 55, doc.y, {
       width: pageWidth - 15,
       goTo: destName,
-      underline: false,
+      underline: true,
     } as any);
 
-    // 播客名 + 日期（辅助信息）
+    // 播客名 + 日期
     doc.font(fontName).fontSize(8.5).fillColor('#999999');
     doc.text(`${ep.podcastName}  ·  ${pubDate}`, 65, doc.y + 1, { width: pageWidth - 25 });
-    doc.y += 6;
+
+    // 四个章节子链接
+    const subLinks = [
+      { label: '📝 摘要', dest: `ep-${i}-summary` },
+      { label: '🎯 要点', dest: `ep-${i}-keypoints` },
+      { label: '🔑 关键词', dest: `ep-${i}-keywords` },
+      { label: '📖 纪要', dest: `ep-${i}-recap` },
+    ];
+    const subY = doc.y + 3;
+    let subX = 65;
+    for (const sub of subLinks) {
+      doc.font(fontName).fontSize(8).fillColor('#aaaaaa');
+      doc.text(sub.label, subX, subY, { goTo: sub.dest, underline: false } as any);
+      subX += 60;
+    }
+    doc.y = subY + 14;
   }
 
   doc.fillColor('#333333');

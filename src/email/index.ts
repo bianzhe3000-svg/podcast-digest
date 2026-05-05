@@ -282,7 +282,16 @@ function buildDigestHtml(episodes: DigestEpisode[], dateStr: string, dailySummar
   for (const [podcastName, eps] of episodesByPodcast) {
     for (const ep of eps) {
       epIndex++;
-      html += `\n      <li><a href="#ep-${epIndex}">${epIndex}. <strong>${escapeHtml(podcastName)}</strong> — ${escapeHtml(ep.episode.title)}</a></li>`;
+      html += `
+      <li style="margin:6px 0;">
+        <a href="#ep-${epIndex}" style="color:#667eea;text-decoration:underline;font-size:14px;">${epIndex}. <strong>${escapeHtml(podcastName)}</strong> — ${escapeHtml(ep.episode.title)}</a>
+        <div style="margin:3px 0 0 16px;font-size:12px;line-height:1.8;">
+          <a href="#ep-${epIndex}-summary" style="color:#888;text-decoration:none;margin-right:10px;">📝 摘要</a>
+          <a href="#ep-${epIndex}-keypoints" style="color:#888;text-decoration:none;margin-right:10px;">🎯 要点</a>
+          <a href="#ep-${epIndex}-keywords" style="color:#888;text-decoration:none;margin-right:10px;">🔑 关键词</a>
+          <a href="#ep-${epIndex}-recap" style="color:#888;text-decoration:none;">📖 纪要</a>
+        </div>
+      </li>`;
     }
   }
   html += `
@@ -329,13 +338,13 @@ function buildDigestHtml(episodes: DigestEpisode[], dateStr: string, dailySummar
 
       // === Section 1: Summary ===
       html += `
-      <div class="section-label">📝 内容核心摘要</div>
+      <div class="section-label" id="ep-${epIndex}-summary">📝 内容核心摘要</div>
       <div class="section-content">${nl2br(ep.analysis.summary)}</div>`;
 
       // === Section 2: Key Points with expandable details ===
       if (keyPoints.length > 0) {
         html += `
-      <div class="section-label">🎯 核心要点</div>
+      <div class="section-label" id="ep-${epIndex}-keypoints">🎯 核心要点</div>
       <div class="key-points">`;
         for (const kp of keyPoints) {
           html += `
@@ -351,7 +360,7 @@ function buildDigestHtml(episodes: DigestEpisode[], dateStr: string, dailySummar
       // === Section 3: Keywords with context ===
       if (keywords.length > 0) {
         html += `
-      <div class="section-label">🔑 核心关键词分析</div>
+      <div class="section-label" id="ep-${epIndex}-keywords">🔑 核心关键词分析</div>
       <div class="keywords-list">`;
         for (const kw of keywords) {
           html += `
@@ -367,7 +376,7 @@ function buildDigestHtml(episodes: DigestEpisode[], dateStr: string, dailySummar
       // === Section 4: Full recap ===
       if (fullRecap) {
         html += `
-      <div class="section-label">📖 长版内容纪要</div>
+      <div class="section-label" id="ep-${epIndex}-recap">📖 长版内容纪要</div>
       <div class="full-recap">${nl2br(fullRecap)}</div>`;
       }
 
