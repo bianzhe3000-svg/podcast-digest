@@ -33,29 +33,32 @@ async function generateScript(episodesInput: string, count: number): Promise<str
   });
   const scriptModel = process.env.DASHSCOPE_SCRIPT_MODEL || 'qwen-plus';
 
-  const prompt = `请基于以下${count}个播客剧集的内容，撰写一段约30分钟的中文播客播报文稿（单人主持口吻）。
+  const prompt = `请基于以下${count}个播客剧集的内容，撰写一段**约30分钟的中文播客播报文稿**（单人主持口吻）。
 
 ${episodesInput}
 
 写作要求：
 - 自然流畅的口语化播报，像电台主持人朗读早间新闻精选
-- 中文语速约220字/分钟，30分钟需要约6500字，请确保总字数在 6000-7000
-- 开场约200字介绍今日内容概况
-- 中间逐集展开，每集 300-500 字，覆盖核心观点、数据、亮点
-- 衔接自然，可使用"接下来"、"另一边"、"值得一提的是"等过渡词
-- 结尾约200字总结
+- **TTS 实测语速约 440 字/分钟，30 分钟需要约 13000 字，请务必让总字数在 12000-14000 字之间**
+- 开场约 400 字介绍今日内容概况和今日重点
+- 中间逐集展开，每集 700-900 字，深入覆盖核心观点、关键数据、有趣细节、嘉宾原话引用
+- 主持人之间可以加入对内容的简评、对比、背景补充
+- 衔接自然，使用"接下来"、"另外值得一提的是"、"切换话题"、"我们再看一个例子"等过渡词
+- 结尾约 400 字回顾全天精华+鼓励性结束语
 - **直接输出正文**，不要任何标题、markdown、列表符号、说明文字
 - 不要有 [A]:、[B]: 之类的标记，全篇连贯散文
-- 标点正常使用，便于朗读断句`;
+- 标点正常使用，便于朗读断句
+- **再次强调：字数必须达到 12000-14000 字，少于 12000 字的输出是不合格的**`;
 
+  logger.info(`Generating script with model=${scriptModel}, max_tokens=20000, target 13000 chars`);
   const llmPromise = client.chat.completions.create({
     model: scriptModel,
     messages: [{ role: 'user', content: prompt }],
-    max_tokens: 10000,
+    max_tokens: 20000,
   }).then(r => r.choices[0]?.message?.content || '');
 
   const timeoutPromise = new Promise<string>((_, reject) =>
-    setTimeout(() => reject(new Error('script LLM hard timeout 240s')), 240000)
+    setTimeout(() => reject(new Error('script LLM hard timeout 360s')), 360000)
   );
 
   return Promise.race([llmPromise, timeoutPromise]);
