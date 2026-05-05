@@ -158,7 +158,7 @@ async function synthesizeOnce(text: string, voice: string = VOICE): Promise<Buff
           Authorization: `Bearer ${config.dashscope.apiKey}`,
           'Content-Type': 'application/json',
         },
-        timeout: 180000,
+        timeout: 240000,  // 4 分钟，匹配外层 Promise.race
       }
     );
     const audioUrl: string | undefined =
@@ -222,18 +222,47 @@ export async function generateDailyDialogue(
   stage(`tts_starting (${chunks.length} chunks, ${script.length} chars)`);
   logger.info(`Script chunked into ${chunks.length} chunks`);
 
-  // 4-3. 串行 TTS 每块
+  // 4-3. 串行 TTS 每块（单块失败跳过 + 重试 1 次，避免一块拖死全部）
   const buffers: Buffer[] = [];
   const startTs = Date.now();
+  let okCount = 0;
+  let failCount = 0;
+
   for (let i = 0; i < chunks.length; i++) {
     stage(`tts_chunk ${i + 1}/${chunks.length} (${chunks[i].length} chars)`);
     logger.info(`TTS chunk ${i + 1}/${chunks.length}, ${chunks[i].length} chars`);
-    const buf = await synthesizeOnce(chunks[i]);
-    buffers.push(buf);
+
+    let chunkOk = false;
+    for (let attempt = 1; attempt <= 2 && !chunkOk; attempt++) {
+      try {
+        const buf = await synthesizeOnce(chunks[i]);
+        buffers.push(buf);
+        chunkOk = true;
+        okCount++;
+      } catch (err) {
+        const msg = (err as Error).message;
+        if (attempt === 1) {
+          logger.warn(`TTS chunk ${i + 1} attempt 1 failed: ${msg.slice(0, 100)}; retrying`);
+          await new Promise(r => setTimeout(r, 2000));
+        } else {
+          logger.warn(`TTS chunk ${i + 1} BOTH attempts failed; skipping`);
+          failCount++;
+        }
+      }
+    }
   }
+
   const elapsedSec = Math.round((Date.now() - startTs) / 1000);
   const combined = Buffer.concat(buffers);
-  logger.info(`TTS done: ${chunks.length} chunks, ${Math.round(combined.length / 1024)}KB, ${elapsedSec}s`);
+  logger.info(`TTS done: ${okCount}/${chunks.length} chunks ok (${failCount} skipped), ${Math.round(combined.length / 1024)}KB, ${elapsedSec}s`);
+
+  if (combined.length === 0) {
+    throw new Error(`All ${chunks.length} TTS chunks failed`);
+  }
+  // 至少 50% 成功才接受（防止音频过于残缺）
+  if (okCount < chunks.length / 2) {
+    throw new Error(`Too many TTS failures: only ${okCount}/${chunks.length} succeeded`);
+  }
 
   // 4-4. 保存到持久化 Volume
   fs.mkdirSync(AUDIO_DIR, { recursive: true });
