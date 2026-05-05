@@ -709,9 +709,11 @@ router.post('/digest/generate', (req: Request, res: Response) => {
 });
 
 // TTS 单次测试，用于诊断音频生成是否可用
-router.get('/debug/test-tts', async (_req: Request, res: Response) => {
-  const result = await testTts();
-  res.json({ success: true, data: result });
+router.get('/debug/test-tts', async (req: Request, res: Response) => {
+  const text = String(req.query.text || '你好，这是语音合成测试。');
+  const voice = String(req.query.voice || '') || undefined;
+  const result = await testTts(text, voice);
+  res.json({ success: true, data: { ...result, textLen: text.length, voice: voice || 'default' } });
 });
 
 // 列出所有播客（用于 chat 页面的下拉选择）

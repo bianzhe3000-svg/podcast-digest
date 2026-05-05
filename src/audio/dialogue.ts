@@ -164,9 +164,12 @@ async function synthesize(text: string, voice: string, attempt = 1): Promise<Buf
 }
 
 /** 单次测试 TTS，供 /api/debug/test-tts 使用 */
-export async function testTts(text = '你好，这是 CosyVoice 语音合成测试。'): Promise<{ ok: boolean; sizeBytes?: number; error?: string }> {
+export async function testTts(
+  text = '你好，这是语音合成测试。',
+  voice?: string
+): Promise<{ ok: boolean; sizeBytes?: number; error?: string }> {
   try {
-    const buf = await synthesize(text, VOICE_A);
+    const buf = await synthesize(text, voice || VOICE_A);
     return { ok: true, sizeBytes: buf.length };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
