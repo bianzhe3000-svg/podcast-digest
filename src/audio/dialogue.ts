@@ -16,7 +16,7 @@ import { logger } from '../utils/logger';
 
 // 音色（Qwen3-TTS-Flash 内置）
 const VOICE = 'Cherry';                   // 女声·阳光
-const MAX_CHARS_PER_TTS = 2000;            // Qwen-TTS-Flash 单次推荐上限
+const MAX_CHARS_PER_TTS = 1000;            // 实测 ~1000 字内 60s 完成，保守值
 
 // 音频持久化目录（与数据库同 Volume，不会随 Railway 重新部署丢失）
 export const AUDIO_DIR = process.env.AUDIO_DIR
@@ -97,6 +97,7 @@ function chunkScript(script: string, maxChars: number = MAX_CHARS_PER_TTS): stri
 
 async function synthesizeOnce(text: string, voice: string = VOICE): Promise<Buffer> {
   const callPromise = (async () => {
+    // 合成本身可能需要 60-120 秒（处理时间 ∝ 文本长度）
     const res = await axios.post(
       'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
       {
@@ -108,7 +109,7 @@ async function synthesizeOnce(text: string, voice: string = VOICE): Promise<Buff
           Authorization: `Bearer ${config.dashscope.apiKey}`,
           'Content-Type': 'application/json',
         },
-        timeout: 60000,
+        timeout: 180000,  // 3 分钟，足够长文本合成
       }
     );
     const audioUrl: string | undefined =
@@ -118,6 +119,7 @@ async function synthesizeOnce(text: string, voice: string = VOICE): Promise<Buff
     if (!audioUrl) {
       throw new Error(`No audio URL in response: ${JSON.stringify(res.data).slice(0, 300)}`);
     }
+    // 下载可能是几 MB 音频，给充足时间
     const dl = await axios.get(audioUrl, { responseType: 'arraybuffer', timeout: 60000 });
     return Buffer.from(dl.data);
   })();
@@ -125,7 +127,7 @@ async function synthesizeOnce(text: string, voice: string = VOICE): Promise<Buff
   return Promise.race([
     callPromise,
     new Promise<Buffer>((_, reject) =>
-      setTimeout(() => reject(new Error('TTS hard timeout 90s')), 90000)
+      setTimeout(() => reject(new Error('TTS hard timeout 240s')), 240000)
     ),
   ]);
 }
