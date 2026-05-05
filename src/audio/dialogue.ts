@@ -277,8 +277,10 @@ export async function generateDailyDialogue(
 
     return filename;
   } catch (err) {
-    logger.error('generateDailyDialogue failed', { error: (err as Error).message });
-    return null;
+    const msg = (err as Error).message;
+    logger.error('generateDailyDialogue failed', { error: msg });
+    // 重新抛出，让 caller 拿到真实错误（不再吞错误返回 null）
+    throw err;
   }
 }
 

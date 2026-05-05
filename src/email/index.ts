@@ -463,12 +463,11 @@ export async function generateAndSaveDigest(
       stage('audio_generating');
       audioFilename = await generateDailyDialogue(episodesInput, dateStr, episodes.length, onStage);
       audioGenerated = !!audioFilename;
-      if (!audioFilename) audioError = 'TTS 全部失败或脚本为空';
       stage(audioGenerated ? 'audio_done' : 'audio_failed');
     } catch (err) {
       audioError = (err as Error).message;
       logger.warn('Audio generation failed', { error: audioError });
-      stage(`audio_error: ${audioError.slice(0, 80)}`);
+      stage(`audio_error: ${audioError.slice(0, 200)}`);
     }
 
     // 保存到数据库
