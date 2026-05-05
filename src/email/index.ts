@@ -106,10 +106,11 @@ async function generateDailySummary(episodes: DigestEpisode[], dateStr: string):
 
   for (let attempt = 1; attempt <= 2; attempt++) {
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 180000);
+    const abortTimer = setTimeout(() => ac.abort(), 150000);
     try {
       logger.info(`Generating daily summary (attempt ${attempt})`, { model: summaryModel, episodes: episodes.length });
-      const resp = await axios.post(
+
+      const apiPromise = axios.post(
         'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
         {
           model: summaryModel,
@@ -121,11 +122,17 @@ async function generateDailySummary(episodes: DigestEpisode[], dateStr: string):
             Authorization: `Bearer ${config.dashscope.apiKey}`,
             'Content-Type': 'application/json',
           },
-          timeout: 180000,
+          timeout: 150000,
           signal: ac.signal,
         }
+      ).then(r => r.data?.choices?.[0]?.message?.content || '');
+
+      // 双重保险：绝对超时 170s
+      const hardTimeout = new Promise<string>((_, reject) =>
+        setTimeout(() => reject(new Error('summary ABSOLUTE TIMEOUT 170s')), 170000)
       );
-      const text: string = resp.data?.choices?.[0]?.message?.content || '';
+
+      const text = await Promise.race([apiPromise, hardTimeout]);
       if (text && text.length > 100) {
         logger.info('Daily summary generated', { length: text.length, attempt });
         return text;
@@ -135,7 +142,8 @@ async function generateDailySummary(episodes: DigestEpisode[], dateStr: string):
       const msg = (err as Error).message;
       logger.warn(`Summary attempt ${attempt} failed`, { error: msg });
     } finally {
-      clearTimeout(timer);
+      clearTimeout(abortTimer);
+      try { ac.abort(); } catch {}
     }
   }
   logger.warn('All summary attempts failed, returning empty');

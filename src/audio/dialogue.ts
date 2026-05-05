@@ -73,27 +73,36 @@ ${episodes}
   const callOnce = async (prompt: string, label: string): Promise<string> => {
     logger.info(`Generating script ${label} with ${scriptModel}`);
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 240000);
-    try {
-      const resp = await axios.post(
-        'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
-        {
-          model: scriptModel,
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: 8000,
+    const abortTimer = setTimeout(() => ac.abort(), 200000);
+
+    const apiPromise = axios.post(
+      'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      {
+        model: scriptModel,
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 8000,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${config.dashscope.apiKey}`,
+          'Content-Type': 'application/json',
         },
-        {
-          headers: {
-            Authorization: `Bearer ${config.dashscope.apiKey}`,
-            'Content-Type': 'application/json',
-          },
-          timeout: 240000,
-          signal: ac.signal,
-        }
-      );
-      return resp.data?.choices?.[0]?.message?.content || '';
+        timeout: 200000,
+        signal: ac.signal,
+      }
+    ).then(r => r.data?.choices?.[0]?.message?.content || '');
+
+    // 双重保险：Promise.race 绝对超时 220s（即使 axios+abort 都失效）
+    const hardTimeout = new Promise<string>((_, reject) =>
+      setTimeout(() => reject(new Error(`script ${label} ABSOLUTE TIMEOUT 220s`)), 220000)
+    );
+
+    try {
+      return await Promise.race([apiPromise, hardTimeout]);
     } finally {
-      clearTimeout(timer);
+      clearTimeout(abortTimer);
+      // 强制 abort，防止 leaked promise 占连接
+      try { ac.abort(); } catch {}
     }
   };
 
