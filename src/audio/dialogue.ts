@@ -33,7 +33,7 @@ async function generateScript(episodesInput: string, dateStr: string, count: num
     timeout: 90000,
   });
 
-  const prompt = `请基于以下${count}个播客剧集的内容，创作一段约5-7分钟的中文播客对话脚本（两位主持人）。
+  const prompt = `请基于以下${count}个播客剧集的内容，创作一段约30分钟的中文播客对话脚本（两位主持人）。
 
 ${episodesInput}
 
@@ -42,16 +42,18 @@ ${episodesInput}
 [B]: 主持人乙的台词
 
 内容要求：
-- 对话自然流畅，像真实播客主持人讨论
-- 覆盖今日各剧集的重要观点和亮点
-- 总字数约1500-2000字
-- 开头简短介绍今日内容，结尾用一句话收尾
+- 对话自然流畅，像真实播客主持人深度讨论
+- 深入覆盖今日每个剧集的重要观点、有趣细节和亮点
+- 中文语速约220字/分钟，30分钟需要约6600字脚本，请确保总字数在6000-7000字
+- 每个剧集内容至少用3-5轮对话深入展开
+- 主持人之间有互动、追问、补充，不是单纯转述
+- 开头介绍今日内容概况（约200字），结尾总结（约200字）
 - 直接输出对话，不要任何其他说明文字`;
 
   const response = await client.chat.completions.create({
     model: config.dashscope.textModel,
     messages: [{ role: 'user', content: prompt }],
-    max_tokens: 3000,
+    max_tokens: 10000,
   });
 
   return response.choices[0]?.message?.content || '';

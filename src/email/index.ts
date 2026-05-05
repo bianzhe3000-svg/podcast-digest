@@ -281,7 +281,7 @@ function buildDigestHtml(episodes: DigestEpisode[], dateStr: string, dailySummar
   </div>
 ${audioUrl ? `  <div class="audio-section">
     <h2>🎙️ 今日播客速览（语音版）</h2>
-    <div class="audio-meta">约 ${audioDurationMin || 5} 分钟 &nbsp;·&nbsp; 双主持人对话</div>
+    <div class="audio-meta">约 ${audioDurationMin || 30} 分钟 &nbsp;·&nbsp; 双主持人深度对话</div>
     <a href="${escapeHtml(audioUrl)}" class="audio-btn" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;text-decoration:none;border-radius:30px;font-size:15px;font-weight:600;">▶ 点击收听</a>
   </div>` : ''}`;
 
@@ -459,9 +459,11 @@ export async function sendDailyDigest(sinceHours: number = 24): Promise<{
     const episodesInput = episodes.map((ep, i) => {
       let keyPoints: { title: string; detail: string }[] = [];
       try { keyPoints = JSON.parse(ep.analysis.key_points || '[]'); } catch {}
-      const kpText = keyPoints.slice(0, 3).map(kp => `  · ${kp.title}`).join('\n');
-      return `【${i + 1}】${ep.podcast.name}：${ep.episode.title}\n${(ep.analysis.summary || '').slice(0, 300)}\n${kpText}`;
-    }).join('\n\n');
+      const kpText = keyPoints.map(kp => `  · ${kp.title}：${kp.detail || ''}`.slice(0, 120)).join('\n');
+      const summary = (ep.analysis.summary || '').slice(0, 600);
+      const recap = (ep.analysis.knowledge_points || '').slice(0, 300);
+      return `【${i + 1}】${ep.podcast.name}：${ep.episode.title}\n摘要：${summary}\n要点：\n${kpText}${recap ? `\n补充：${recap}` : ''}`;
+    }).join('\n\n---\n\n');
 
     let audioUrl: string | undefined;
     let audioDurationMin: number | undefined;
