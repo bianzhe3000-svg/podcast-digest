@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Podcast Digest - 播客内容处理系统</title>
-  <link rel="stylesheet" href="/css/style.css?v=20260505">
+  <link rel="stylesheet" href="/css/style.css?v=20260505b">
 </head>
 <body>
   <div class="app">
@@ -26,6 +26,9 @@
         </li>
         <li class="nav-item" data-page="digest">
           <span class="nav-icon">📅</span> 每日摘要
+        </li>
+        <li class="nav-item" data-page="chat">
+          <span class="nav-icon">💬</span> 智能对话
         </li>
         <li class="nav-item" data-page="scheduler">
           <span class="nav-icon">⏰</span> 定时任务
@@ -100,6 +103,13 @@
 
       <!-- Daily Digest -->
       <div class="page" id="page-digest">
+        <div class="page-header">
+          <h2>每日摘要</h2>
+          <div class="actions">
+            <button class="btn btn-secondary" onclick="App.checkDigestPreview()">📊 查看可用剧集</button>
+            <button class="btn btn-primary" onclick="App.triggerDigestGenerate()">🔄 立即生成今日摘要</button>
+          </div>
+        </div>
         <div class="digest-layout">
           <!-- Date list sidebar -->
           <div class="digest-date-sidebar">
@@ -109,6 +119,36 @@
           <!-- Main content -->
           <div class="digest-main" id="digest-main">
             <div class="empty-state">← 选择左侧日期查看每日摘要</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Smart Chat -->
+      <div class="page" id="page-chat">
+        <h2>💬 智能对话与搜索</h2>
+        <div class="chat-scope-bar">
+          <div class="chat-scope-row">
+            <label>对话范围：</label>
+            <select id="chat-scope-select" onchange="App.onChatScopeChange()">
+              <option value="global">🌐 全部内容（搜索+问答）</option>
+              <option value="podcast">🎙️ 单个播客</option>
+              <option value="episode">🎧 单个剧集</option>
+              <option value="date">📅 某日摘要</option>
+            </select>
+            <select id="chat-podcast-select" onchange="App.onChatPodcastChange()" style="display:none"></select>
+            <select id="chat-episode-select" style="display:none"></select>
+            <input type="date" id="chat-date-select" style="display:none;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;">
+            <button class="btn btn-sm btn-secondary" onclick="App.clearChat()">🧹 清空对话</button>
+          </div>
+          <div class="chat-scope-hint" id="chat-scope-hint">从1733+集已分析剧集中智能检索回答你的问题</div>
+        </div>
+        <div class="global-chat" id="global-chat-container">
+          <div class="chat-messages" id="global-chat-messages">
+            <div class="chat-welcome">👋 你好！我可以：<br>• <strong>搜索内容</strong>："最近哪些剧集讨论了AI agents？"<br>• <strong>归纳话题</strong>："综合所有讨论中医的剧集，给我一个概述"<br>• <strong>查询某剧集</strong>：选择上方的"单个剧集"范围后提问</div>
+          </div>
+          <div class="chat-input-row">
+            <input type="text" id="global-chat-input" class="chat-input" placeholder="输入问题，按 Enter 发送..." onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();App.sendGlobalChat();}">
+            <button class="btn btn-primary" onclick="App.sendGlobalChat()">发送</button>
           </div>
         </div>
       </div>
@@ -188,6 +228,6 @@
   <div id="toast-container"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="/js/app.js?v=20260505"></script>
+  <script src="/js/app.js?v=20260505b"></script>
 </body>
 </html>

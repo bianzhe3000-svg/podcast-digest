@@ -1,6 +1,7 @@
 const App = {
   currentPage: 'dashboard',
   _digestState: { date: null, history: [] },
+  _globalChatState: { scope: 'global', scopeId: null, history: [] },
 
   // === Navigation ===
   navigateTo(page) {
@@ -20,6 +21,7 @@ const App = {
       case 'podcasts': this.loadPodcasts(); break;
       case 'documents': this.loadDocuments(); break;
       case 'digest': this.loadDigest(); break;
+      case 'chat': this.loadChat(); break;
       case 'scheduler': this.loadSchedulerStatus(); break;
       case 'logs': this.loadLogs(); break;
       case 'settings': this.loadSettings(); break;
@@ -710,6 +712,179 @@ const App = {
       history.push({ role: 'assistant', content: result.reply });
       if (history.length > 20) history.splice(0, history.length - 20);
 
+    } catch (e) {
+      thinkingDiv.remove();
+      const errDiv = document.createElement('div');
+      errDiv.className = 'chat-message chat-message-thinking';
+      errDiv.textContent = '抱歉，请求失败，请稍后重试';
+      messagesEl.appendChild(errDiv);
+    }
+
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    input.disabled = false;
+    input.focus();
+  },
+
+  async checkDigestPreview() {
+    try {
+      const data = await this.api('/email/digest-preview');
+      this.toast(`过去 24h: ${data.last24h} 集 · 72h: ${data.last72h} 集 · 7天: ${data.last168h} 集`, 'info');
+    } catch (e) { /* handled */ }
+  },
+
+  async triggerDigestGenerate() {
+    const hoursStr = prompt('生成包含过去多少小时内已处理剧集的摘要？（默认24小时；如果今天没有新处理的剧集，可改为 168 = 过去7天）', '24');
+    if (!hoursStr) return;
+    const hours = parseInt(hoursStr, 10) || 24;
+    this.toast(`已开始生成（窗口 ${hours} 小时，约需2-3分钟）...`, 'info');
+    try {
+      const result = await this.api(`/digest/generate?hours=${hours}`, { method: 'POST' });
+      if (result.taskLogId) this.pollDigestTask(result.taskLogId);
+    } catch (e) { /* handled */ }
+  },
+
+  pollDigestTask(taskLogId) {
+    const interval = setInterval(async () => {
+      try {
+        const logs = await this.api('/logs?limit=10');
+        const task = logs.find(l => l.id === taskLogId);
+        if (task && (task.status === 'completed' || task.status === 'failed')) {
+          clearInterval(interval);
+          if (task.status === 'completed') {
+            this.toast(`摘要生成完成（${task.processed_episodes} 集）${task.error_details ? ' · 音频警告：' + task.error_details : ''}`, 'success');
+            if (this.currentPage === 'digest') this.loadDigest();
+          } else {
+            this.toast(`生成失败：${task.error_details || '未知错误'}`, 'error');
+          }
+        }
+      } catch (e) { clearInterval(interval); }
+    }, 5000);
+    setTimeout(() => clearInterval(interval), 600000);
+  },
+
+  // === Smart Chat Page ===
+  async loadChat() {
+    this._globalChatState = { scope: 'global', scopeId: null, history: [] };
+    document.getElementById('chat-scope-select').value = 'global';
+    this.onChatScopeChange();
+    // Pre-fetch podcast list
+    try {
+      const podcasts = await this.api('/podcasts/with-episodes');
+      const sel = document.getElementById('chat-podcast-select');
+      sel.innerHTML = '<option value="">选择播客...</option>' +
+        podcasts.map(p => `<option value="${p.id}">${this.escapeHtml(p.name)}</option>`).join('');
+    } catch (e) { /* handled */ }
+  },
+
+  onChatScopeChange() {
+    const scope = document.getElementById('chat-scope-select').value;
+    const podcastSel = document.getElementById('chat-podcast-select');
+    const episodeSel = document.getElementById('chat-episode-select');
+    const dateSel = document.getElementById('chat-date-select');
+    const hint = document.getElementById('chat-scope-hint');
+
+    podcastSel.style.display = (scope === 'podcast' || scope === 'episode') ? '' : 'none';
+    episodeSel.style.display = scope === 'episode' ? '' : 'none';
+    dateSel.style.display = scope === 'date' ? '' : 'none';
+
+    const hints = {
+      global: '从所有已分析的剧集中智能检索回答你的问题（同时支持搜索意图和综合问答）',
+      podcast: '基于所选播客的所有剧集回答',
+      episode: '基于所选单一剧集的完整内容回答',
+      date: '基于某天每日摘要中的剧集回答',
+    };
+    hint.textContent = hints[scope];
+
+    this._globalChatState = { scope, scopeId: null, history: [] };
+  },
+
+  async onChatPodcastChange() {
+    const podcastId = document.getElementById('chat-podcast-select').value;
+    const scope = document.getElementById('chat-scope-select').value;
+
+    if (scope === 'podcast') {
+      this._globalChatState.scopeId = podcastId ? parseInt(podcastId, 10) : null;
+      return;
+    }
+    if (scope === 'episode' && podcastId) {
+      try {
+        const eps = await this.api(`/podcasts/${podcastId}/analyzed-episodes`);
+        const sel = document.getElementById('chat-episode-select');
+        sel.innerHTML = '<option value="">选择剧集...</option>' +
+          eps.map(e => `<option value="${e.episode_id}">${this.escapeHtml(e.episode_title)} (${(e.published_at || '').slice(0, 10)})</option>`).join('');
+        sel.onchange = () => {
+          this._globalChatState.scopeId = sel.value ? parseInt(sel.value, 10) : null;
+        };
+      } catch (e) { /* handled */ }
+    }
+  },
+
+  clearChat() {
+    document.getElementById('global-chat-messages').innerHTML =
+      '<div class="chat-welcome">对话已清空。继续提问吧 👋</div>';
+    this._globalChatState.history = [];
+  },
+
+  async sendGlobalChat() {
+    const input = document.getElementById('global-chat-input');
+    const messagesEl = document.getElementById('global-chat-messages');
+    if (!input || !messagesEl) return;
+
+    const message = input.value.trim();
+    if (!message) return;
+
+    const scope = document.getElementById('chat-scope-select').value;
+    let scopeId = null;
+    if (scope === 'podcast') scopeId = document.getElementById('chat-podcast-select').value;
+    else if (scope === 'episode') scopeId = document.getElementById('chat-episode-select').value;
+    else if (scope === 'date') scopeId = document.getElementById('chat-date-select').value;
+
+    if ((scope === 'podcast' || scope === 'episode' || scope === 'date') && !scopeId) {
+      this.toast('请先在上方选择具体的范围', 'error');
+      return;
+    }
+
+    input.value = '';
+    input.disabled = true;
+
+    const userDiv = document.createElement('div');
+    userDiv.className = 'chat-message chat-message-user';
+    userDiv.textContent = message;
+    messagesEl.appendChild(userDiv);
+
+    const thinkingDiv = document.createElement('div');
+    thinkingDiv.className = 'chat-message chat-message-thinking';
+    thinkingDiv.textContent = scope === 'global' ? '正在检索全部内容...' : '思考中...';
+    messagesEl.appendChild(thinkingDiv);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+
+    try {
+      const result = await this.api('/chat', {
+        method: 'POST',
+        body: { scope, scopeId, message, history: this._globalChatState.history },
+      });
+
+      thinkingDiv.remove();
+
+      const wrap = document.createElement('div');
+      wrap.className = 'chat-message chat-message-assistant';
+      wrap.textContent = result.reply;
+
+      if (result.citations && result.citations.length > 0) {
+        const cites = document.createElement('div');
+        cites.className = 'chat-message-citations';
+        cites.innerHTML = '📎 引用剧集：' + result.citations.slice(0, 8).map(c =>
+          `<span class="chat-citation">${this.escapeHtml(c.podcastName)}：${this.escapeHtml(c.episodeTitle.slice(0, 30))}${c.episodeTitle.length > 30 ? '...' : ''}</span>`
+        ).join('');
+        wrap.appendChild(cites);
+      }
+      messagesEl.appendChild(wrap);
+
+      this._globalChatState.history.push({ role: 'user', content: message });
+      this._globalChatState.history.push({ role: 'assistant', content: result.reply });
+      if (this._globalChatState.history.length > 20) {
+        this._globalChatState.history.splice(0, this._globalChatState.history.length - 20);
+      }
     } catch (e) {
       thinkingDiv.remove();
       const errDiv = document.createElement('div');

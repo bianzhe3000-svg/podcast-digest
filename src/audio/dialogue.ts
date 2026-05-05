@@ -33,7 +33,7 @@ async function generateScript(episodesInput: string, dateStr: string, count: num
     timeout: 90000,
   });
 
-  const prompt = `请基于以下${count}个播客剧集的内容，创作一段约30分钟的中文播客对话脚本（两位主持人）。
+  const prompt = `请基于以下${count}个播客剧集的内容，创作一段约15分钟的中文播客对话脚本（两位主持人）。
 
 ${episodesInput}
 
@@ -43,17 +43,18 @@ ${episodesInput}
 
 内容要求：
 - 对话自然流畅，像真实播客主持人深度讨论
-- 深入覆盖今日每个剧集的重要观点、有趣细节和亮点
-- 中文语速约220字/分钟，30分钟需要约6600字脚本，请确保总字数在6000-7000字
-- 每个剧集内容至少用3-5轮对话深入展开
-- 主持人之间有互动、追问、补充，不是单纯转述
-- 开头介绍今日内容概况（约200字），结尾总结（约200字）
+- 覆盖今日每个剧集的重要观点和亮点
+- 中文语速约220字/分钟，15分钟需要约3300字脚本，请确保总字数在3000-3500字
+- 每个剧集2-3轮对话简明展开，避免冗长
+- 主持人之间有互动、追问、补充
+- 开头介绍今日内容概况（约150字），结尾总结（约100字）
+- 每行台词不超过80字（便于TTS合成）
 - 直接输出对话，不要任何其他说明文字`;
 
   const response = await client.chat.completions.create({
     model: config.dashscope.textModel,
     messages: [{ role: 'user', content: prompt }],
-    max_tokens: 10000,
+    max_tokens: 6000,
   });
 
   return response.choices[0]?.message?.content || '';
@@ -76,28 +77,50 @@ function parseScript(script: string): DialogueLine[] {
 
 // ── 3. 单行 TTS 合成（CosyVoice-v2）────────────────────────────────────────
 
-async function synthesize(text: string, voice: string): Promise<Buffer> {
-  const res = await axios.post(
-    'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-to-voice/voice-synthesis',
-    {
-      model: 'cosyvoice-v2',
-      input: { text },
-      parameters: { voice, format: 'mp3', sample_rate: 22050 },
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${config.dashscope.apiKey}`,
-        'Content-Type': 'application/json',
+async function synthesize(text: string, voice: string, attempt = 1): Promise<Buffer> {
+  try {
+    const res = await axios.post(
+      'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-to-voice/voice-synthesis',
+      {
+        model: 'cosyvoice-v2',
+        input: { text },
+        parameters: { voice, format: 'mp3', sample_rate: 22050 },
       },
-      timeout: 60000,
-    }
-  );
+      {
+        headers: {
+          Authorization: `Bearer ${config.dashscope.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 60000,
+      }
+    );
 
-  const audioBase64: string = res.data?.output?.audio;
-  if (!audioBase64) {
-    throw new Error(`CosyVoice no audio field: ${JSON.stringify(res.data).slice(0, 200)}`);
+    const audioBase64: string = res.data?.output?.audio;
+    if (!audioBase64) {
+      throw new Error(`CosyVoice no audio field: ${JSON.stringify(res.data).slice(0, 200)}`);
+    }
+    return Buffer.from(audioBase64, 'base64');
+  } catch (err: any) {
+    // 429 限流 / 5xx 错误时重试 2 次（指数退避）
+    const status = err.response?.status;
+    if ((status === 429 || (status >= 500 && status < 600)) && attempt < 3) {
+      const delay = 1500 * Math.pow(2, attempt - 1);
+      logger.warn(`TTS retry ${attempt + 1}/3 after ${delay}ms (status=${status})`);
+      await new Promise(r => setTimeout(r, delay));
+      return synthesize(text, voice, attempt + 1);
+    }
+    throw new Error(`CosyVoice ${status || 'network'}: ${err.response?.data?.message || err.message}`);
   }
-  return Buffer.from(audioBase64, 'base64');
+}
+
+/** 单次测试 TTS，供 /api/debug/test-tts 使用 */
+export async function testTts(text = '你好，这是 CosyVoice 语音合成测试。'): Promise<{ ok: boolean; sizeBytes?: number; error?: string }> {
+  try {
+    const buf = await synthesize(text, VOICE_A);
+    return { ok: true, sizeBytes: buf.length };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
 }
 
 // ── 4. 主入口 ───────────────────────────────────────────────────────────────

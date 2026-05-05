@@ -4,7 +4,8 @@ import { getDatabase } from '../database';
 import { searchPodcasts, parseOPML, parseFeed, validateFeed } from '../rss';
 import { processEpisode, refreshAndProcessPodcast, runFullPipeline } from '../pipeline/processor';
 import { startScheduler, stopScheduler, getSchedulerStatus, triggerManualRun, triggerEmailDigest } from '../scheduler';
-import { sendDailyDigest, testEmailConnection } from '../email';
+import { sendDailyDigest, testEmailConnection, generateAndSaveDigest } from '../email';
+import { testTts } from '../audio/dialogue';
 import { listMarkdownFiles, listMarkdownFilesWithMeta, readMarkdown } from '../markdown';
 import { exportToPdf } from '../markdown/pdf';
 import { logger } from '../utils/logger';
@@ -680,6 +681,57 @@ router.post('/email/send-digest', (req: Request, res: Response) => {
 
 // === Daily Digest WebUI API ===
 
+// 立即生成今日摘要（供 WebUI 按钮调用，独立于邮件发送）
+// 后台运行，立即返回 taskId
+router.post('/digest/generate', (req: Request, res: Response) => {
+  const sinceHours = parseInt(String(req.query.hours || req.body?.hours || ''), 10) || 24;
+  const db = getDatabase();
+  const taskLogId = db.createTaskLog(`generate_digest_${sinceHours}h`);
+  res.json({ success: true, data: { message: `已开始生成（窗口 ${sinceHours} 小时）`, taskLogId } });
+
+  generateAndSaveDigest(sinceHours).then(result => {
+    db.updateTaskLog(taskLogId, {
+      status: result.ok ? 'completed' : 'failed',
+      total_episodes: result.episodeCount,
+      processed_episodes: result.episodeCount,
+      error_details: result.error || result.audioError,
+    });
+    logger.info('Digest generation done', { ok: result.ok, episodes: result.episodeCount, audio: result.audioGenerated, audioErr: result.audioError });
+  }).catch(err => {
+    db.updateTaskLog(taskLogId, { status: 'failed', error_details: (err as Error).message });
+    logger.error('Digest generation failed', { error: (err as Error).message });
+  });
+});
+
+// TTS 单次测试，用于诊断音频生成是否可用
+router.get('/debug/test-tts', async (_req: Request, res: Response) => {
+  const result = await testTts();
+  res.json({ success: true, data: result });
+});
+
+// 列出所有播客（用于 chat 页面的下拉选择）
+router.get('/podcasts/with-episodes', (_req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const podcasts = db.getActivePodcasts();
+    res.json({ success: true, data: podcasts.map(p => ({ id: p.id, name: p.name })) });
+  } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// 列出某播客的所有剧集（用于剧集级 chat 选择）
+router.get('/podcasts/:id/analyzed-episodes', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const podcastId = parseInt(param(req, 'id'), 10);
+    const eps = db.getAnalyzedEpisodesByPodcast(podcastId, 100);
+    res.json({ success: true, data: eps });
+  } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
 // 列出所有已生成的每日摘要
 router.get('/digest/list', (_req: Request, res: Response) => {
   try {
@@ -818,6 +870,194 @@ router.post('/digest/chat', async (req: Request, res: Response) => {
 
     const reply = completion.choices[0]?.message?.content || '抱歉，无法生成回答。';
     res.json({ success: true, data: { reply } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// === Universal Chat (Q&A + Search) ===
+//
+// scope:
+//   'global'   - 全局搜索：用关键词在所有已分析剧集中检索后再回答（带引用）
+//   'podcast'  - 单播客作用域：scopeId = podcast_id
+//   'episode'  - 单剧集作用域：scopeId = episode_id
+//   'date'     - 单日作用域：scopeId = YYYY-MM-DD（沿用 daily_digests）
+router.post('/chat', async (req: Request, res: Response) => {
+  try {
+    const { scope, scopeId, message, history = [] } = req.body as {
+      scope: 'global' | 'podcast' | 'episode' | 'date';
+      scopeId?: number | string;
+      message: string;
+      history: { role: 'user' | 'assistant'; content: string }[];
+    };
+
+    if (!scope || !message) {
+      res.status(400).json({ success: false, error: 'scope and message required' });
+      return;
+    }
+
+    const db = getDatabase();
+    let context = '';
+    const citations: Array<{ episodeId: number; podcastName: string; episodeTitle: string; publishedAt: string }> = [];
+
+    if (scope === 'episode') {
+      const epId = parseInt(String(scopeId), 10);
+      const ep = db.getEpisodeFullAnalysis(epId);
+      if (!ep) { res.status(404).json({ success: false, error: 'Episode not found' }); return; }
+      let kpText = '';
+      let kwText = '';
+      try {
+        const kp: Array<{title:string;detail:string}> = JSON.parse(ep.key_points || '[]');
+        kpText = kp.map(k => `· ${k.title}：${k.detail || ''}`).join('\n');
+      } catch {}
+      try {
+        const kw: Array<{word:string;context:string}> = JSON.parse(ep.arguments || '[]');
+        kwText = kw.map(k => `· ${k.word}：${k.context || ''}`).join('\n');
+      } catch {}
+      context = `这是一集播客的完整内容：\n\n【${ep.podcast_name}：${ep.episode_title}】\n发布时间：${ep.published_at}\n\n摘要：\n${ep.summary}\n\n核心要点：\n${kpText}\n\n关键词：\n${kwText}\n\n详细纪要：\n${(ep.knowledge_points || '').slice(0, 4000)}\n\n基于以上内容回答用户问题，准确、简洁、有见地。`;
+      citations.push({ episodeId: epId, podcastName: ep.podcast_name, episodeTitle: ep.episode_title, publishedAt: ep.published_at });
+    } else if (scope === 'podcast') {
+      const podcastId = parseInt(String(scopeId), 10);
+      const podcast = db.getPodcastById(podcastId);
+      if (!podcast) { res.status(404).json({ success: false, error: 'Podcast not found' }); return; }
+      const eps = db.getAnalyzedEpisodesByPodcast(podcastId, 30);
+      context = `以下是播客【${podcast.name}】最近 ${eps.length} 集的内容：\n\n`;
+      let charCount = context.length;
+      for (const ep of eps) {
+        let kpText = '';
+        try {
+          const kp: Array<{title:string;detail:string}> = JSON.parse(ep.key_points || '[]');
+          kpText = kp.slice(0, 5).map(k => `  · ${k.title}`).join('\n');
+        } catch {}
+        const summary = (ep.summary || '').slice(0, 400);
+        const block = `【${ep.episode_title}】(${ep.published_at?.slice(0,10) || ''})\n${summary}\n要点：\n${kpText}\n\n`;
+        if (charCount + block.length > 14000) break;
+        context += block;
+        charCount += block.length;
+        citations.push({ episodeId: ep.episode_id, podcastName: podcast.name, episodeTitle: ep.episode_title, publishedAt: ep.published_at });
+      }
+      context += `\n基于以上内容回答用户问题，可在回答中明确引用具体剧集名。`;
+    } else if (scope === 'date') {
+      const date = String(scopeId).replace(/[^0-9\-]/g, '');
+      const digest = db.getDailyDigest(date);
+      if (!digest) { res.status(404).json({ success: false, error: 'No digest for this date' }); return; }
+      const episodeIds: number[] = JSON.parse(digest.episode_ids || '[]');
+      context = `以下是 ${date} 当日播客摘要内容：\n\n`;
+      if (digest.summary) context += `【今日全览】\n${digest.summary}\n\n`;
+      let charCount = context.length;
+      for (const id of episodeIds) {
+        const ep = db.getEpisodeById(id);
+        const a = db.getAnalysisResult(id);
+        if (!ep || !a) continue;
+        const podcast = db.getPodcastById(ep.podcast_id);
+        let kpText = '';
+        try {
+          const kp: Array<{title:string;detail:string}> = JSON.parse(a.key_points || '[]');
+          kpText = kp.map(k => `  · ${k.title}：${k.detail || ''}`).join('\n');
+        } catch {}
+        const block = `【${podcast?.name || ''}：${ep.title}】\n${a.summary}\n要点：\n${kpText}\n\n`;
+        if (charCount + block.length > 12000) break;
+        context += block;
+        charCount += block.length;
+        citations.push({ episodeId: id, podcastName: podcast?.name || '', episodeTitle: ep.title, publishedAt: ep.published_at });
+      }
+    } else {
+      // === scope === 'global' ===
+      // 1) 用 LLM 从用户问题中提炼搜索关键词（中文 1-3 个）
+      const keywordExtractor = new OpenAI({
+        apiKey: config.dashscope.apiKey,
+        baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        timeout: 30000,
+      });
+      let keywords: string[] = [];
+      try {
+        const kwResp = await keywordExtractor.chat.completions.create({
+          model: config.dashscope.textModel,
+          messages: [
+            { role: 'system', content: '从用户问题中提取 1-3 个最具检索价值的中文/英文关键词，用空格分隔，只输出关键词本身，不要任何解释。例如用户问"AI agents 最近的进展"，输出"AI Agents 进展"。' },
+            { role: 'user', content: message },
+          ],
+          max_tokens: 60,
+        });
+        const kwText = kwResp.choices[0]?.message?.content || '';
+        keywords = kwText.split(/\s+/).map(s => s.trim()).filter(s => s.length >= 2).slice(0, 3);
+      } catch {}
+      if (keywords.length === 0) keywords = [message.slice(0, 20)];
+
+      // 2) 在 SQLite 中搜索匹配剧集（每个关键词检索一批，去重）
+      const seen = new Set<number>();
+      const candidates: ReturnType<typeof db.searchEpisodesByKeyword> = [];
+      for (const kw of keywords) {
+        const rows = db.searchEpisodesByKeyword(kw, 15);
+        for (const r of rows) {
+          if (!seen.has(r.episode_id)) {
+            seen.add(r.episode_id);
+            candidates.push(r);
+          }
+          if (candidates.length >= 25) break;
+        }
+        if (candidates.length >= 25) break;
+      }
+
+      if (candidates.length === 0) {
+        res.json({ success: true, data: {
+          reply: `在所有已处理的剧集中没有找到与「${keywords.join('、')}」相关的内容。可以尝试其他关键词，例如更通用的话题词。`,
+          citations: [], keywords,
+        }});
+        return;
+      }
+
+      // 3) 构建上下文（每集精简到 ~500 字以内）
+      context = `用户在播客内容库中搜索"${message}"（自动提取关键词：${keywords.join('、')}）。\n\n以下是检索到的 ${candidates.length} 个最相关剧集，按发布时间倒序：\n\n`;
+      let charCount = context.length;
+      for (const c of candidates) {
+        let kpText = '';
+        try {
+          const kp: Array<{title:string;detail:string}> = JSON.parse(c.key_points || '[]');
+          kpText = kp.slice(0, 4).map(k => `  · ${k.title}`).join('\n');
+        } catch {}
+        const summary = (c.summary || '').slice(0, 400);
+        const block = `[剧集 #${c.episode_id}]【${c.podcast_name}：${c.episode_title}】(${c.published_at?.slice(0,10) || ''})\n${summary}\n要点：\n${kpText}\n\n`;
+        if (charCount + block.length > 14000) break;
+        context += block;
+        charCount += block.length;
+        citations.push({ episodeId: c.episode_id, podcastName: c.podcast_name, episodeTitle: c.episode_title, publishedAt: c.published_at });
+      }
+      context += `\n基于以上检索结果回答用户问题。要求：\n1. 准确、简洁，引用具体剧集名（用「播客名：剧集名」格式）\n2. 如果是搜索意图（用户找内容），列出 3-5 个最相关剧集并简述每集亮点\n3. 如果是问答意图，综合多集信息给出深度回答\n4. 引用时使用格式：「《播客名：剧集名》提到..."`;
+    }
+
+    // 调用 Qwen 生成回答
+    const client = new OpenAI({
+      apiKey: config.dashscope.apiKey,
+      baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      timeout: 90000,
+    });
+
+    const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
+      { role: 'system', content: `你是播客内容智能助手，由 Qwen3.6 驱动。\n\n${context}` },
+      ...history.slice(-10),
+      { role: 'user', content: message },
+    ];
+
+    const completion = await client.chat.completions.create({
+      model: config.dashscope.textModel,
+      messages,
+      max_tokens: 1500,
+    });
+
+    const reply = completion.choices[0]?.message?.content || '抱歉，无法生成回答。';
+    res.json({ success: true, data: { reply, citations, scope } });
+  } catch (err) {
+    logger.error('Chat failed', { error: (err as Error).message });
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// === Email send-digest preview & flexible window ===
+router.get('/email/digest-preview', (_req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    res.json({ success: true, data: db.countCompletedSinceWindows() });
   } catch (err) {
     res.status(500).json({ success: false, error: (err as Error).message });
   }

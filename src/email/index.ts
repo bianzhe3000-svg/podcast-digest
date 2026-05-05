@@ -413,6 +413,75 @@ ${audioUrl ? `  <div class="audio-section">
 }
 
 /**
+ * 生成并保存每日摘要（不发邮件），供 WebUI 调用
+ * 返回包含摘要文本、音频文件名、剧集 ID 列表的对象
+ */
+export async function generateAndSaveDigest(sinceHours: number = 24): Promise<{
+  ok: boolean;
+  episodeCount: number;
+  date: string;
+  summary?: string;
+  audioFilename?: string | null;
+  audioGenerated?: boolean;
+  audioError?: string;
+  error?: string;
+}> {
+  const today = dayjs().tz('Asia/Shanghai').format('YYYY-MM-DD');
+  try {
+    const rawEpisodes = getRecentCompletedEpisodes(sinceHours);
+    if (rawEpisodes.length === 0) {
+      return { ok: false, episodeCount: 0, date: today, error: `过去 ${sinceHours} 小时没有已完成的剧集` };
+    }
+    const episodes = sortEpisodesByPodcast(rawEpisodes);
+    const dateStr = dayjs().tz('Asia/Shanghai').format('YYYY年MM月DD日');
+
+    logger.info('Generating digest', { sinceHours, episodes: episodes.length });
+
+    const dailySummary = await generateDailySummary(episodes, dateStr);
+
+    // 音频
+    const episodesInput = episodes.map((ep, i) => {
+      let keyPoints: { title: string; detail: string }[] = [];
+      try { keyPoints = JSON.parse(ep.analysis.key_points || '[]'); } catch {}
+      const kpText = keyPoints.map(kp => `  · ${kp.title}：${kp.detail || ''}`.slice(0, 120)).join('\n');
+      const summary = (ep.analysis.summary || '').slice(0, 600);
+      const recap = (ep.analysis.knowledge_points || '').slice(0, 300);
+      return `【${i + 1}】${ep.podcast.name}：${ep.episode.title}\n摘要：${summary}\n要点：\n${kpText}${recap ? `\n补充：${recap}` : ''}`;
+    }).join('\n\n---\n\n');
+
+    let audioFilename: string | null = null;
+    let audioGenerated = false;
+    let audioError: string | undefined;
+    try {
+      audioFilename = await generateDailyDialogue(episodesInput, dateStr, episodes.length);
+      audioGenerated = !!audioFilename;
+      if (!audioFilename) audioError = 'TTS 全部失败或脚本为空';
+    } catch (err) {
+      audioError = (err as Error).message;
+      logger.warn('Audio generation failed', { error: audioError });
+    }
+
+    // 保存到数据库
+    const db = getDatabase();
+    const episodeIds = episodes.map(ep => ep.episode.id);
+    db.saveDailyDigest(today, dailySummary || '', audioFilename, episodeIds);
+    logger.info('Digest saved to DB', { date: today, episodes: episodeIds.length, audio: audioGenerated });
+
+    return {
+      ok: true,
+      episodeCount: episodes.length,
+      date: today,
+      summary: dailySummary,
+      audioFilename,
+      audioGenerated,
+      audioError,
+    };
+  } catch (err) {
+    return { ok: false, episodeCount: 0, date: today, error: (err as Error).message };
+  }
+}
+
+/**
  * Send daily digest email
  */
 export async function sendDailyDigest(sinceHours: number = 24): Promise<{

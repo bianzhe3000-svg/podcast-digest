@@ -383,6 +383,71 @@ class DatabaseManager {
     };
   }
 
+  // === Search & Chat Helpers ===
+
+  /** 全局搜索：在剧集标题、摘要、要点、关键词、纪要中匹配关键词 */
+  searchEpisodesByKeyword(keyword: string, limit = 20): Array<{
+    episode_id: number; podcast_name: string; episode_title: string;
+    published_at: string; summary: string; key_points: string;
+    arguments: string; knowledge_points: string;
+  }> {
+    const kw = `%${keyword}%`;
+    return this.db.prepare(`
+      SELECT e.id as episode_id, p.name as podcast_name, e.title as episode_title,
+             e.published_at, a.summary, a.key_points, a.arguments, a.knowledge_points
+      FROM analysis_results a
+      JOIN episodes e ON e.id = a.episode_id
+      JOIN podcasts p ON p.id = e.podcast_id
+      WHERE e.title LIKE ?
+         OR a.summary LIKE ?
+         OR a.key_points LIKE ?
+         OR a.arguments LIKE ?
+         OR a.knowledge_points LIKE ?
+      ORDER BY e.published_at DESC
+      LIMIT ?
+    `).all(kw, kw, kw, kw, kw, limit) as any[];
+  }
+
+  /** 获取某个播客的所有已分析剧集（用于播客作用域对话） */
+  getAnalyzedEpisodesByPodcast(podcastId: number, limit = 30): Array<{
+    episode_id: number; episode_title: string; published_at: string;
+    summary: string; key_points: string;
+  }> {
+    return this.db.prepare(`
+      SELECT e.id as episode_id, e.title as episode_title, e.published_at,
+             a.summary, a.key_points
+      FROM analysis_results a
+      JOIN episodes e ON e.id = a.episode_id
+      WHERE e.podcast_id = ?
+      ORDER BY e.published_at DESC
+      LIMIT ?
+    `).all(podcastId, limit) as any[];
+  }
+
+  /** 获取单一剧集的完整分析（用于剧集作用域对话） */
+  getEpisodeFullAnalysis(episodeId: number): {
+    podcast_name: string; episode_title: string; published_at: string;
+    summary: string; key_points: string; arguments: string;
+    knowledge_points: string; transcript: string | null;
+  } | undefined {
+    return this.db.prepare(`
+      SELECT p.name as podcast_name, e.title as episode_title, e.published_at,
+             a.summary, a.key_points, a.arguments, a.knowledge_points, a.transcript
+      FROM analysis_results a
+      JOIN episodes e ON e.id = a.episode_id
+      JOIN podcasts p ON p.id = e.podcast_id
+      WHERE e.id = ?
+    `).get(episodeId) as any;
+  }
+
+  /** 统计若干时间窗口内已完成剧集（用于"立即发送摘要"前的预览） */
+  countCompletedSinceWindows(): { last24h: number; last72h: number; last168h: number } {
+    const r24 = this.db.prepare(`SELECT COUNT(*) as c FROM episodes WHERE status='completed' AND processed_at >= datetime('now','-24 hours')`).get() as any;
+    const r72 = this.db.prepare(`SELECT COUNT(*) as c FROM episodes WHERE status='completed' AND processed_at >= datetime('now','-72 hours')`).get() as any;
+    const r168 = this.db.prepare(`SELECT COUNT(*) as c FROM episodes WHERE status='completed' AND processed_at >= datetime('now','-168 hours')`).get() as any;
+    return { last24h: r24.c || 0, last72h: r72.c || 0, last168h: r168.c || 0 };
+  }
+
   // === Daily Digests ===
 
   saveDailyDigest(date: string, summary: string, audioFilename: string | null, episodeIds: number[]): void {
