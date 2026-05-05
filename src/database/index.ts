@@ -383,6 +383,31 @@ class DatabaseManager {
     };
   }
 
+  // === Daily Digests ===
+
+  saveDailyDigest(date: string, summary: string, audioFilename: string | null, episodeIds: number[]): void {
+    this.db.prepare(`
+      INSERT OR REPLACE INTO daily_digests (date, summary, audio_filename, episode_ids)
+      VALUES (?, ?, ?, ?)
+    `).run(date, summary, audioFilename, JSON.stringify(episodeIds));
+  }
+
+  getDailyDigest(date: string): { id: number; date: string; summary: string | null; audio_filename: string | null; episode_ids: string | null; created_at: string } | undefined {
+    return this.db.prepare('SELECT * FROM daily_digests WHERE date = ?').get(date) as any;
+  }
+
+  listDailyDigests(limit = 30): { date: string; has_summary: number; has_audio: number; created_at: string }[] {
+    return this.db.prepare(`
+      SELECT date,
+        CASE WHEN summary IS NOT NULL AND summary != '' THEN 1 ELSE 0 END as has_summary,
+        CASE WHEN audio_filename IS NOT NULL THEN 1 ELSE 0 END as has_audio,
+        created_at
+      FROM daily_digests
+      ORDER BY date DESC
+      LIMIT ?
+    `).all(limit) as any[];
+  }
+
   close(): void {
     this.db.close();
   }

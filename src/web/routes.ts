@@ -9,6 +9,7 @@ import { listMarkdownFiles, listMarkdownFilesWithMeta, readMarkdown } from '../m
 import { exportToPdf } from '../markdown/pdf';
 import { logger } from '../utils/logger';
 import { AUDIO_DIR } from '../audio/dialogue';
+import OpenAI from 'openai';
 import path from 'path';
 import fs from 'fs';
 
@@ -675,6 +676,151 @@ router.post('/email/send-digest', (req: Request, res: Response) => {
   }).catch(err => {
     logger.error('send-digest failed', { error: (err as Error).message });
   });
+});
+
+// === Daily Digest WebUI API ===
+
+// 列出所有已生成的每日摘要
+router.get('/digest/list', (_req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const list = db.listDailyDigests(30);
+    res.json({ success: true, data: list });
+  } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// 获取某天的摘要详情（含剧集列表）
+router.get('/digest/:date', (req: Request, res: Response) => {
+  try {
+    const date = String(req.params.date).replace(/[^0-9\-]/g, '');
+    const db = getDatabase();
+    const digest = db.getDailyDigest(date);
+    if (!digest) {
+      res.status(404).json({ success: false, error: 'No digest for this date' });
+      return;
+    }
+
+    const episodeIds: number[] = JSON.parse(digest.episode_ids || '[]');
+    const episodes = episodeIds.map(id => {
+      const ep = db.getEpisodeById(id);
+      if (!ep) return null;
+      const podcast = db.getPodcastById(ep.podcast_id);
+      const analysis = db.getAnalysisResult(id);
+      if (!analysis) return null;
+      let keyPoints: { title: string; detail: string }[] = [];
+      let keywords: { word: string; context: string }[] = [];
+      try { keyPoints = JSON.parse(analysis.key_points || '[]'); } catch {}
+      try { keywords = JSON.parse(analysis.arguments || '[]'); } catch {}
+      return {
+        id,
+        title: ep.title,
+        podcastName: podcast?.name || '',
+        publishedAt: ep.published_at,
+        durationSeconds: ep.duration_seconds,
+        audioUrl: ep.audio_url,
+        summary: analysis.summary,
+        keyPoints,
+        keywords,
+        fullRecap: analysis.knowledge_points,
+      };
+    }).filter(Boolean);
+
+    const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+      ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+      : 'https://podcast-digest-production.up.railway.app';
+
+    const audioUrl = digest.audio_filename
+      ? `${baseUrl}/api/audio/${digest.audio_filename}`
+      : null;
+
+    // 验证音频文件是否还在磁盘上
+    const audioExists = digest.audio_filename
+      ? fs.existsSync(path.join(AUDIO_DIR, digest.audio_filename))
+      : false;
+
+    res.json({
+      success: true,
+      data: {
+        date,
+        summary: digest.summary,
+        audioUrl: audioExists ? audioUrl : null,
+        audioFilename: audioExists ? digest.audio_filename : null,
+        episodeCount: episodes.length,
+        episodes,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// 每日摘要 Q&A 对话
+router.post('/digest/chat', async (req: Request, res: Response) => {
+  try {
+    const { date, message, history = [] } = req.body as {
+      date: string;
+      message: string;
+      history: { role: 'user' | 'assistant'; content: string }[];
+    };
+
+    if (!date || !message) {
+      res.status(400).json({ success: false, error: 'date and message required' });
+      return;
+    }
+
+    const db = getDatabase();
+    const digest = db.getDailyDigest(date.replace(/[^0-9\-]/g, ''));
+    if (!digest) {
+      res.status(404).json({ success: false, error: 'No digest for this date' });
+      return;
+    }
+
+    // 构建上下文（今日全览 + 每集摘要）
+    const episodeIds: number[] = JSON.parse(digest.episode_ids || '[]');
+    let context = `以下是 ${date} 当日播客摘要内容，供你回答用户问题：\n\n`;
+    if (digest.summary) context += `【今日全览】\n${digest.summary}\n\n`;
+
+    let charCount = context.length;
+    for (const id of episodeIds) {
+      const ep = db.getEpisodeById(id);
+      const analysis = db.getAnalysisResult(id);
+      if (!ep || !analysis) continue;
+      const podcast = db.getPodcastById(ep.podcast_id);
+      let keyPoints: { title: string; detail: string }[] = [];
+      try { keyPoints = JSON.parse(analysis.key_points || '[]'); } catch {}
+      const kpText = keyPoints.map(kp => `  · ${kp.title}：${kp.detail || ''}`).join('\n');
+      const epContext = `【${podcast?.name || ''}：${ep.title}】\n${analysis.summary}\n要点：\n${kpText}\n${analysis.knowledge_points ? '详情：' + analysis.knowledge_points.slice(0, 400) : ''}\n\n`;
+
+      if (charCount + epContext.length > 12000) break; // 防止超 token
+      context += epContext;
+      charCount += epContext.length;
+    }
+
+    const client = new OpenAI({
+      apiKey: config.dashscope.apiKey,
+      baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      timeout: 60000,
+    });
+
+    const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
+      { role: 'system', content: `你是播客内容助手，根据以下内容回答用户问题。回答要准确、简洁、有见地。\n\n${context}` },
+      ...history.slice(-10), // 最近10条历史
+      { role: 'user', content: message },
+    ];
+
+    const completion = await client.chat.completions.create({
+      model: config.dashscope.textModel,
+      messages,
+      max_tokens: 1000,
+    });
+
+    const reply = completion.choices[0]?.message?.content || '抱歉，无法生成回答。';
+    res.json({ success: true, data: { reply } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
 });
 
 // === Audio file serving ===

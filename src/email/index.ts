@@ -521,6 +521,18 @@ export async function sendDailyDigest(sinceHours: number = 24): Promise<{
 
     await sendEmail({ from, to: config.email.toAddress, subject, html, attachments });
 
+    // Persist digest to DB for WebUI display
+    try {
+      const db = getDatabase();
+      const today = dayjs().tz('Asia/Shanghai').format('YYYY-MM-DD');
+      const episodeIds = episodes.map(ep => ep.episode.id);
+      const audioFilename = audioUrl ? audioUrl.split('/').pop() || null : null;
+      db.saveDailyDigest(today, dailySummary || '', audioFilename, episodeIds);
+      logger.info('Daily digest saved to DB', { date: today, episodes: episodeIds.length });
+    } catch (err) {
+      logger.warn('Failed to save digest to DB', { error: (err as Error).message });
+    }
+
     logger.info('Daily digest email sent', {
       provider,
       to: config.email.toAddress,

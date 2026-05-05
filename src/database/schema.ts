@@ -63,4 +63,13 @@ CREATE INDEX IF NOT EXISTS idx_episodes_published_at ON episodes(published_at);
 CREATE INDEX IF NOT EXISTS idx_episodes_status ON episodes(status);
 CREATE INDEX IF NOT EXISTS idx_analysis_episode_id ON analysis_results(episode_id);
 CREATE INDEX IF NOT EXISTS idx_task_logs_started_at ON task_logs(started_at);
+
+CREATE TABLE IF NOT EXISTS daily_digests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  date TEXT NOT NULL UNIQUE,
+  summary TEXT,
+  audio_filename TEXT,
+  episode_ids TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
 `;
