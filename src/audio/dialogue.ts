@@ -33,9 +33,11 @@ async function generateScript(episodesInput: string, dateStr: string, count: num
   const client = new OpenAI({
     apiKey: config.dashscope.apiKey,
     baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    timeout: 180000,
+    timeout: 300000,
     maxRetries: 0,  // 不要 SDK 内部重试
   });
+  // 脚本生成用快速非推理模型（qwen-plus 比 qwen3.6 快 3-5 倍，长文本输出更稳定）
+  const scriptModel = process.env.DASHSCOPE_SCRIPT_MODEL || 'qwen-plus';
 
   const prompt = `请基于以下${count}个播客剧集的内容，创作一段约30分钟的中文播客对话脚本（两位主持人）。
 
@@ -56,16 +58,17 @@ ${episodesInput}
 - 总行数控制在 100-150 行
 - 直接输出对话，不要任何其他说明文字`;
 
-  // 显式 AbortController 兜底（180s）
+  // 显式 AbortController 兜底（300s）
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 180000);
+  const timer = setTimeout(() => ac.abort(), 300000);
   let response;
   try {
+    logger.info(`Generating script with model=${scriptModel}, max_tokens=10000`);
     response = await client.chat.completions.create(
       {
-        model: config.dashscope.textModel,
+        model: scriptModel,
         messages: [{ role: 'user', content: prompt }],
-        max_tokens: 12000,
+        max_tokens: 10000,
       },
       { signal: ac.signal }
     );
