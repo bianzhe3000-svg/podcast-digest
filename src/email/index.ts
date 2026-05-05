@@ -1,6 +1,6 @@
 import nodemailer from 'nodemailer';
 import dns from 'dns';
-import OpenAI from 'openai';
+import axios from 'axios';
 import { Resend } from 'resend';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
@@ -101,40 +101,41 @@ async function generateDailySummary(episodes: DigestEpisode[], dateStr: string):
 
   const prompt = `你是专业播客内容编辑。以下是${dateStr}更新的${episodes.length}个播客剧集内容：\n\n${episodeInputs}\n\n请将以上所有剧集的精华整合成一篇**3500-4000字（绝不超过4000字）**的当日总结。要求：\n1. 按话题/领域归类梳理，不要逐集罗列\n2. 突出最有价值的观点、数据和洞见\n3. 语言流畅，适合快速阅读\n4. 用中文撰写，直接输出正文，不加额外标题\n5. 必须涵盖以上 ${episodes.length} 个剧集的核心内容，不要遗漏任何一集的关键观点`;
 
-  // 用快速非推理模型 qwen-plus 生成（比 qwen3.6-plus 快 3-5 倍，更稳定）
+  // 用 qwen-plus 快速非推理模型，axios 直连 DashScope 兼容 endpoint（避免 OpenAI SDK 偶发 hang）
   const summaryModel = process.env.DASHSCOPE_SUMMARY_MODEL || 'qwen-plus';
 
-  // 重试 2 次（应对偶发的 Qwen 网络/响应问题）
   for (let attempt = 1; attempt <= 2; attempt++) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 180000);
     try {
-      const client = new OpenAI({
-        apiKey: config.dashscope.apiKey,
-        baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-        timeout: 180000,
-        maxRetries: 0,
-      });
-
       logger.info(`Generating daily summary (attempt ${attempt})`, { model: summaryModel, episodes: episodes.length });
-
-      // 180 秒硬超时；max_tokens 6000 给 4000 中文字符留够余量
-      const llmPromise = client.chat.completions.create({
-        model: summaryModel,
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 6000,
-      }).then(r => r.choices[0]?.message?.content || '');
-
-      const timeoutPromise = new Promise<string>((_, reject) =>
-        setTimeout(() => reject(new Error('summary LLM hard timeout 180s')), 180000)
+      const resp = await axios.post(
+        'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+        {
+          model: summaryModel,
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 6000,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${config.dashscope.apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 180000,
+          signal: ac.signal,
+        }
       );
-
-      const text = await Promise.race([llmPromise, timeoutPromise]);
+      const text: string = resp.data?.choices?.[0]?.message?.content || '';
       if (text && text.length > 100) {
         logger.info('Daily summary generated', { length: text.length, attempt });
         return text;
       }
-      logger.warn(`Summary attempt ${attempt} returned too-short text (${text?.length || 0} chars)`);
+      logger.warn(`Summary attempt ${attempt} too short (${text.length} chars)`);
     } catch (err) {
-      logger.warn(`Summary attempt ${attempt} failed`, { error: (err as Error).message });
+      const msg = (err as Error).message;
+      logger.warn(`Summary attempt ${attempt} failed`, { error: msg });
+    } finally {
+      clearTimeout(timer);
     }
   }
   logger.warn('All summary attempts failed, returning empty');

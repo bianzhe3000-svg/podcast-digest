@@ -25,12 +25,6 @@ export const AUDIO_DIR = process.env.AUDIO_DIR
 // ── 1. 生成单人播报脚本 ─────────────────────────────────────────────────────
 
 async function generateScript(episodesInput: string, count: number, onStage?: (s: string) => void): Promise<string> {
-  const client = new OpenAI({
-    apiKey: config.dashscope.apiKey,
-    baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    timeout: 240000,
-    maxRetries: 0,
-  });
   const scriptModel = process.env.DASHSCOPE_SCRIPT_MODEL || 'qwen-plus';
 
   // 把剧集分成前后两半，分两次 LLM 调用各生成 ~6500 字（避免 qwen-plus 8K token 输出上限）
@@ -78,15 +72,29 @@ ${episodes}
 
   const callOnce = async (prompt: string, label: string): Promise<string> => {
     logger.info(`Generating script ${label} with ${scriptModel}`);
-    const llmPromise = client.chat.completions.create({
-      model: scriptModel,
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 8000,
-    }).then(r => r.choices[0]?.message?.content || '');
-    const timeoutPromise = new Promise<string>((_, reject) =>
-      setTimeout(() => reject(new Error(`script ${label} hard timeout 240s`)), 240000)
-    );
-    return Promise.race([llmPromise, timeoutPromise]);
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 240000);
+    try {
+      const resp = await axios.post(
+        'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+        {
+          model: scriptModel,
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 8000,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${config.dashscope.apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 240000,
+          signal: ac.signal,
+        }
+      );
+      return resp.data?.choices?.[0]?.message?.content || '';
+    } finally {
+      clearTimeout(timer);
+    }
   };
 
   onStage?.('script_part1_generating');

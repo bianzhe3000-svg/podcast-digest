@@ -708,6 +708,23 @@ router.post('/digest/generate', (req: Request, res: Response) => {
   });
 });
 
+// 清理超过 30 分钟仍 running 的僵尸任务（部署/进程死亡留下的）
+router.post('/debug/cleanup-stale-tasks', (_req: Request, res: Response) => {
+  try {
+    const db = (getDatabase() as any).db;
+    const result = db.prepare(`
+      UPDATE task_logs
+      SET status='failed', error_details=COALESCE(error_details,'')||' [auto-cleaned: stale]',
+          completed_at=datetime('now'),
+          duration_ms = CAST((julianday('now') - julianday(started_at)) * 86400000 AS INTEGER)
+      WHERE status='running' AND started_at <= datetime('now', '-30 minutes')
+    `).run();
+    res.json({ success: true, data: { cleaned: result.changes } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
 // TTS 单次测试，用于诊断音频生成是否可用
 router.get('/debug/test-tts', async (req: Request, res: Response) => {
   const text = String(req.query.text || '你好，这是语音合成测试。');
