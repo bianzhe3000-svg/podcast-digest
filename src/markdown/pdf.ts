@@ -259,7 +259,7 @@ export async function generateEpisodePdf(data: PdfEpisodeData): Promise<Buffer> 
 // 每日汇总 PDF（一个文件包含所有剧集 + 全局目录）
 // ============================================================
 
-export async function generateDigestPdf(episodes: PdfEpisodeData[], dateStr: string): Promise<Buffer> {
+export async function generateDigestPdf(episodes: PdfEpisodeData[], dateStr: string, dailySummary?: string): Promise<Buffer> {
   const chineseFont = findChineseFont();
 
   const doc = new PDFDocument({
@@ -324,6 +324,28 @@ export async function generateDigestPdf(episodes: PdfEpisodeData[], dateStr: str
   }
 
   doc.fillColor('#333333');
+
+  // ============ 今日全览摘要页 ============
+  if (dailySummary) {
+    doc.addPage();
+
+    // 橙色顶部色条
+    doc.rect(0, 0, doc.page.width, 80).fill('#f5a623');
+    doc.fill('#ffffff').font(fontBold).fontSize(20)
+      .text('🌅 今日全览', 50, 22, { width: pageWidth, align: 'center' });
+    doc.font(fontName).fontSize(12)
+      .text(dateStr, 50, 52, { width: pageWidth, align: 'center' });
+
+    doc.fill('#333333');
+    doc.y = 100;
+
+    // 左侧橙色竖线装饰
+    const summaryStartY = doc.y;
+    doc.font(fontName).fontSize(11).fillColor('#3a2a00');
+    doc.text(dailySummary, 60, doc.y, { width: pageWidth - 10, lineGap: 5 });
+    const summaryEndY = doc.y;
+    doc.rect(50, summaryStartY - 2, 4, summaryEndY - summaryStartY + 8).fill('#f5a623');
+  }
 
   // ============ 逐集内容 ============
   for (let i = 0; i < episodes.length; i++) {

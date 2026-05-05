@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
 import dns from 'dns';
+import OpenAI from 'openai';
 import { Resend } from 'resend';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
@@ -83,6 +84,47 @@ async function sendEmail(options: { from: string; to: string; subject: string; h
 }
 
 /**
+ * 调用 DashScope 生成当日所有剧集的综合摘要（不超过3000字）
+ */
+async function generateDailySummary(episodes: DigestEpisode[], dateStr: string): Promise<string> {
+  if (episodes.length === 0) return '';
+
+  // 构建每集的简要输入（截断避免超 token）
+  const episodeInputs = episodes.map((ep, i) => {
+    let keyPoints: { title: string; detail: string }[] = [];
+    try { keyPoints = JSON.parse(ep.analysis.key_points || '[]'); } catch {}
+    const kpText = keyPoints.slice(0, 4).map(kp => `  · ${kp.title}`).join('\n');
+    const summary = (ep.analysis.summary || '').substring(0, 350);
+    return `【${i + 1}】${ep.podcast.name}：${ep.episode.title}\n摘要：${summary}\n要点：\n${kpText}`;
+  }).join('\n\n---\n\n');
+
+  const prompt = `你是专业播客内容编辑。以下是${dateStr}更新的${episodes.length}个播客剧集内容：\n\n${episodeInputs}\n\n请将以上所有剧集的精华整合成一篇不超过3000字的当日总结。要求：\n1. 按话题/领域归类梳理，不要逐集罗列\n2. 突出最有价值的观点、数据和洞见\n3. 语言流畅，适合快速阅读\n4. 用中文撰写，直接输出正文，不加额外标题`;
+
+  try {
+    const client = new OpenAI({
+      apiKey: config.dashscope.apiKey,
+      baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      timeout: 120000,
+    });
+
+    logger.info('Generating daily summary via DashScope', { model: config.dashscope.textModel, episodes: episodes.length });
+
+    const response = await client.chat.completions.create({
+      model: config.dashscope.textModel,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 4000,
+    });
+
+    const text = response.choices[0]?.message?.content || '';
+    logger.info('Daily summary generated', { length: text.length });
+    return text;
+  } catch (err) {
+    logger.warn('Failed to generate daily summary, skipping', { error: (err as Error).message });
+    return '';
+  }
+}
+
+/**
  * Get all episodes completed in the last N hours with their analysis
  */
 function getRecentCompletedEpisodes(sinceHours: number = 24): DigestEpisode[] {
@@ -153,7 +195,7 @@ function sortEpisodesByPodcast(episodes: DigestEpisode[]): DigestEpisode[] {
 /**
  * Build full HTML email with all 4 sections per episode
  */
-function buildDigestHtml(episodes: DigestEpisode[], dateStr: string): string {
+function buildDigestHtml(episodes: DigestEpisode[], dateStr: string, dailySummary?: string): string {
   // episodes 已经在外部统一排好序
   const episodesByPodcast = new Map<string, DigestEpisode[]>();
   for (const ep of episodes) {
@@ -215,6 +257,11 @@ function buildDigestHtml(episodes: DigestEpisode[], dateStr: string): string {
 
   .divider { height: 1px; background: #e8e8e8; margin: 8px 0; }
 
+  /* Daily overview summary */
+  .daily-overview { padding: 24px 30px; background: linear-gradient(135deg, #fff8f0 0%, #fff3e8 100%); border-left: 4px solid #f5a623; border-top: 1px solid #fde0b8; border-bottom: 1px solid #fde0b8; }
+  .daily-overview h2 { margin: 0 0 14px 0; font-size: 17px; color: #c47a1a; }
+  .daily-overview .overview-content { font-size: 14px; line-height: 1.9; color: #4a3a20; text-align: justify; white-space: pre-wrap; }
+
   .footer { padding: 24px 30px; background: #f8f9fa; text-align: center; font-size: 12px; color: #999; border-top: 1px solid #e8e8e8; }
 </style>
 </head>
@@ -241,6 +288,15 @@ function buildDigestHtml(episodes: DigestEpisode[], dateStr: string): string {
   html += `
     </ul>
   </div>`;
+
+  // Daily overview summary
+  if (dailySummary) {
+    html += `
+  <div class="daily-overview">
+    <h2>🌅 今日全览</h2>
+    <div class="overview-content">${nl2br(dailySummary)}</div>
+  </div>`;
+  }
 
   // Full episode details
   epIndex = 0;
@@ -374,7 +430,11 @@ export async function sendDailyDigest(sinceHours: number = 24): Promise<{
     const episodes = sortEpisodesByPodcast(rawEpisodes);
 
     const dateStr = dayjs().tz('Asia/Shanghai').format('YYYY年MM月DD日');
-    const html = buildDigestHtml(episodes, dateStr);
+
+    // Generate daily overview summary via LLM
+    const dailySummary = await generateDailySummary(episodes, dateStr);
+
+    const html = buildDigestHtml(episodes, dateStr, dailySummary);
     const subject = `🎧 Podcast Digest - ${dateStr} (${episodes.length}篇新内容)`;
     const from = config.email.fromAddress || config.email.smtpUser || 'Podcast Digest <onboarding@resend.dev>';
 
@@ -399,7 +459,7 @@ export async function sendDailyDigest(sinceHours: number = 24): Promise<{
         };
       });
 
-      const pdfBuffer = await generateDigestPdf(pdfEpisodes, dateStr);
+      const pdfBuffer = await generateDigestPdf(pdfEpisodes, dateStr, dailySummary);
       attachments.push({
         filename: `Podcast-Digest-${dayjs().tz('Asia/Shanghai').format('YYYY-MM-DD')}.pdf`,
         content: pdfBuffer,
