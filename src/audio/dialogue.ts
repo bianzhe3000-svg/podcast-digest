@@ -13,9 +13,9 @@ import dayjs from 'dayjs';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 
-// 两位主持人的声音（Sambert 模型 - 同步 TTS 接口）
-const VOICE_A = 'sambert-zhinan-v1';  // 女声 - 柔和（主持人甲）
-const VOICE_B = 'sambert-zhichu-v1';  // 男声 - 沉稳（主持人乙）
+// 两位主持人的声音（CosyVoice-v1 内置音色）
+const VOICE_A = 'longxiaochun'; // 女声·温暖（主持人甲）
+const VOICE_B = 'longshu';      // 男声·专业（主持人乙）
 
 export const AUDIO_DIR = '/tmp/podcast-audio';
 
@@ -79,31 +79,57 @@ function parseScript(script: string): DialogueLine[] {
 
 async function synthesize(text: string, voice: string, attempt = 1): Promise<Buffer> {
   try {
-    // Sambert 同步 TTS：POST /api/v1/services/audio/tts，响应是 audio/mpeg 二进制流
-    const res = await axios.post(
+    // 使用 CosyVoice 异步 TTS（DashScope 标准异步 API）
+    // 1. 创建任务
+    const submitRes = await axios.post(
       'https://dashscope.aliyuncs.com/api/v1/services/audio/tts',
       {
-        model: voice,  // sambert-zhinan-v1 / sambert-zhichu-v1 等
+        model: 'cosyvoice-v1',
         input: { text },
-        parameters: { format: 'mp3', sample_rate: 16000, volume: 50, rate: 1.0, pitch: 1.0 },
+        parameters: { voice, format: 'mp3', sample_rate: 22050, volume: 50, rate: 1.0, pitch: 1.0 },
       },
       {
         headers: {
           Authorization: `Bearer ${config.dashscope.apiKey}`,
           'Content-Type': 'application/json',
+          'X-DashScope-Async': 'enable',
         },
-        timeout: 60000,
-        responseType: 'arraybuffer',
+        timeout: 30000,
       }
     );
 
-    const buf = Buffer.from(res.data);
-    // 如果返回的是 JSON 错误（不是音频），第一个字节通常是 '{'
-    if (buf.length < 100 || buf[0] === 0x7B) {
-      const txt = buf.toString('utf-8').slice(0, 300);
-      throw new Error(`Sambert returned non-audio: ${txt}`);
+    const taskId = submitRes.data?.output?.task_id;
+    if (!taskId) {
+      throw new Error(`Submit failed: ${JSON.stringify(submitRes.data).slice(0, 200)}`);
     }
-    return buf;
+
+    // 2. 轮询任务状态
+    const maxPoll = 30;  // 最多 60 秒
+    let audioUrl: string | undefined;
+    for (let i = 0; i < maxPoll; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      const pollRes = await axios.get(
+        `https://dashscope.aliyuncs.com/api/v1/tasks/${taskId}`,
+        {
+          headers: { Authorization: `Bearer ${config.dashscope.apiKey}` },
+          timeout: 15000,
+        }
+      );
+      const status = pollRes.data?.output?.task_status;
+      if (status === 'SUCCEEDED') {
+        audioUrl = pollRes.data?.output?.audio_url || pollRes.data?.output?.results?.[0]?.audio_url;
+        if (!audioUrl) throw new Error(`SUCCEEDED but no audio_url: ${JSON.stringify(pollRes.data).slice(0, 200)}`);
+        break;
+      }
+      if (status === 'FAILED' || status === 'CANCELED') {
+        throw new Error(`Task ${status}: ${JSON.stringify(pollRes.data?.output).slice(0, 200)}`);
+      }
+    }
+    if (!audioUrl) throw new Error('TTS task timeout (60s)');
+
+    // 3. 下载音频文件
+    const dlRes = await axios.get(audioUrl, { responseType: 'arraybuffer', timeout: 30000 });
+    return Buffer.from(dlRes.data);
   } catch (err: any) {
     const status = err.response?.status;
     if ((status === 429 || (status >= 500 && status < 600)) && attempt < 3) {
@@ -112,15 +138,18 @@ async function synthesize(text: string, voice: string, attempt = 1): Promise<Buf
       await new Promise(r => setTimeout(r, delay));
       return synthesize(text, voice, attempt + 1);
     }
-    // 解析二进制错误响应中的 JSON 信息
     let errMsg = err.message;
     if (err.response?.data) {
       try {
-        const txt = Buffer.from(err.response.data).toString('utf-8').slice(0, 300);
-        errMsg = `${status} ${txt}`;
+        const txt = typeof err.response.data === 'string'
+          ? err.response.data
+          : Buffer.isBuffer(err.response.data)
+            ? Buffer.from(err.response.data).toString('utf-8')
+            : JSON.stringify(err.response.data);
+        errMsg = `${status} ${txt.slice(0, 300)}`;
       } catch {}
     }
-    throw new Error(`Sambert ${status || 'network'}: ${errMsg}`);
+    throw new Error(`TTS ${status || 'network'}: ${errMsg}`);
   }
 }
 
