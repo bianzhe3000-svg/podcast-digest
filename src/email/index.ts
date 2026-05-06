@@ -558,33 +558,53 @@ export async function sendDailyDigest(sinceHours: number = 24): Promise<{
 
     const dateStr = dayjs().tz('Asia/Shanghai').format('YYYY年MM月DD日');
 
-    // Generate daily overview summary via LLM
-    const dailySummary = await generateDailySummary(episodes, dateStr);
+    // 优先复用今日已生成的 digest（来自 generateAndSaveDigest 或先前调用）
+    // 这样邮件 cron 不需要重新跑一次 30 分钟的音频生成流程
+    const today = dayjs().tz('Asia/Shanghai').format('YYYY-MM-DD');
+    const db = getDatabase();
+    const existingDigest = db.getDailyDigest(today);
 
-    // Generate daily dialogue audio (two-host podcast style)
-    const episodesInput = episodes.map((ep, i) => {
-      let keyPoints: { title: string; detail: string }[] = [];
-      try { keyPoints = JSON.parse(ep.analysis.key_points || '[]'); } catch {}
-      const kpText = keyPoints.map(kp => `  · ${kp.title}：${kp.detail || ''}`.slice(0, 120)).join('\n');
-      const summary = (ep.analysis.summary || '').slice(0, 600);
-      const recap = (ep.analysis.knowledge_points || '').slice(0, 300);
-      return `【${i + 1}】${ep.podcast.name}：${ep.episode.title}\n摘要：${summary}\n要点：\n${kpText}${recap ? `\n补充：${recap}` : ''}`;
-    }).join('\n\n---\n\n');
-
+    let dailySummary = '';
     let audioUrl: string | undefined;
     let audioDurationMin: number | undefined;
-    try {
-      const audioFilename = await generateDailyDialogue(episodesInput, dateStr, episodes.length);
-      if (audioFilename) {
+    let needsGenerate = true;
+
+    if (existingDigest && existingDigest.summary && existingDigest.audio_filename) {
+      // 检查 audio 文件是否还在磁盘上
+      const fs = await import('fs');
+      const path = await import('path');
+      const { AUDIO_DIR } = await import('../audio/dialogue');
+      const audioPath = path.join(AUDIO_DIR, existingDigest.audio_filename);
+      if (fs.existsSync(audioPath)) {
+        dailySummary = existingDigest.summary;
         const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN
           ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
           : 'https://podcast-digest-production.up.railway.app';
-        audioUrl = `${baseUrl}/api/audio/${audioFilename}`;
-        audioDurationMin = estimateAudioDuration(audioFilename);
-        logger.info('Audio generated', { audioUrl, audioDurationMin });
+        audioUrl = `${baseUrl}/api/audio/${existingDigest.audio_filename}`;
+        audioDurationMin = estimateAudioDuration(existingDigest.audio_filename);
+        needsGenerate = false;
+        logger.info('Email reusing existing digest from DB', { date: today, audio: audioUrl, summaryChars: dailySummary.length });
+      } else {
+        logger.warn('Existing digest record found but audio file missing on disk, regenerating');
       }
-    } catch (err) {
-      logger.warn('Audio generation failed, sending email without audio', { error: (err as Error).message });
+    }
+
+    if (needsGenerate) {
+      // 没有现成 digest，调 generateAndSaveDigest（会处理摘要+音频生成+保存）
+      logger.info('No usable digest found, calling generateAndSaveDigest');
+      const result = await generateAndSaveDigest(sinceHours);
+      if (result.ok) {
+        dailySummary = result.summary || '';
+        if (result.audioFilename) {
+          const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+            ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+            : 'https://podcast-digest-production.up.railway.app';
+          audioUrl = `${baseUrl}/api/audio/${result.audioFilename}`;
+          audioDurationMin = estimateAudioDuration(result.audioFilename);
+        }
+      } else {
+        logger.warn('generateAndSaveDigest failed, sending email with what we have', { error: result.error });
+      }
     }
 
     const html = buildDigestHtml(episodes, dateStr, dailySummary, audioUrl, audioDurationMin);

@@ -2,10 +2,11 @@ import cron from 'node-cron';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { runFullPipeline } from '../pipeline/processor';
-import { sendDailyDigest } from '../email';
+import { sendDailyDigest, generateAndSaveDigest } from '../email';
 
 let scheduledTask: cron.ScheduledTask | null = null;
 let emailTask: cron.ScheduledTask | null = null;
+let digestGenTask: cron.ScheduledTask | null = null;
 let isRunning = false;
 let lastRunTime: string | null = null;
 let lastRunStatus: string | null = null;
@@ -35,8 +36,44 @@ export function startScheduler(): void {
     timezone: config.scheduler.timezone,
   });
 
+  // Start digest generation scheduler (7am Beijing, 1h before email)
+  startDigestGenScheduler();
+
   // Start email digest scheduler
   startEmailScheduler();
+}
+
+export function startDigestGenScheduler(): void {
+  if (digestGenTask) {
+    digestGenTask.stop();
+    digestGenTask = null;
+  }
+
+  // 默认 7am Beijing time（邮件之前 1 小时预生成）
+  const digestCron = process.env.DIGEST_GEN_CRON || '0 7 * * *';
+  if (!cron.validate(digestCron)) {
+    logger.error('Invalid digest gen cron', { cron: digestCron });
+    return;
+  }
+
+  digestGenTask = cron.schedule(digestCron, async () => {
+    try {
+      logger.info('Digest pre-generation task started (1h before email)');
+      const result = await generateAndSaveDigest(24);
+      logger.info('Digest pre-generation done', {
+        ok: result.ok,
+        episodes: result.episodeCount,
+        audio: result.audioGenerated,
+        audioErr: result.audioError,
+      });
+    } catch (err) {
+      logger.error('Digest pre-generation failed', { error: (err as Error).message });
+    }
+  }, {
+    timezone: config.email.scheduleTimezone,
+  });
+
+  logger.info('Digest gen scheduler started', { cron: digestCron, timezone: config.email.scheduleTimezone });
 }
 
 export function startEmailScheduler(): void {
@@ -78,6 +115,11 @@ export function stopScheduler(): void {
     emailTask.stop();
     emailTask = null;
     logger.info('Email scheduler stopped');
+  }
+  if (digestGenTask) {
+    digestGenTask.stop();
+    digestGenTask = null;
+    logger.info('Digest gen scheduler stopped');
   }
 }
 
