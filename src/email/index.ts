@@ -241,16 +241,6 @@ function buildDigestHtml(episodes: DigestEpisode[], dateStr: string, dailySummar
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; margin: 0; padding: 0; background: #f0f2f5; color: #333; line-height: 1.6; }
   .container { max-width: 780px; margin: 0 auto; background: #fff; }
-  .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #fff; padding: 32px; text-align: center; }
-  .header h1 { margin: 0; font-size: 26px; letter-spacing: 1px; }
-  .header .date { opacity: 0.9; margin-top: 8px; font-size: 15px; }
-  .header .count { margin-top: 4px; font-size: 13px; opacity: 0.8; }
-
-  /* Audio player section */
-  .audio-section { padding: 20px 30px; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: #fff; text-align: center; }
-  .audio-section h2 { margin: 0 0 8px 0; font-size: 18px; letter-spacing: 0.5px; }
-  .audio-section .audio-meta { font-size: 13px; opacity: 0.7; margin-bottom: 16px; }
-  .audio-btn { display: inline-block; padding: 12px 32px; background: linear-gradient(135deg, #667eea, #764ba2); color: #fff; text-decoration: none; border-radius: 30px; font-size: 15px; font-weight: 600; letter-spacing: 0.5px; }
 
   .toc { padding: 20px 30px; background: #f8f9fa; border-bottom: 1px solid #e8e8e8; }
   .toc h2 { font-size: 16px; margin: 0 0 10px 0; color: #555; }
@@ -299,17 +289,19 @@ function buildDigestHtml(episodes: DigestEpisode[], dateStr: string, dailySummar
   .footer { padding: 24px 30px; background: #f8f9fa; text-align: center; font-size: 12px; color: #999; border-top: 1px solid #e8e8e8; }
 </style>
 </head>
-<body>
-<div class="container">
-  <div class="header">
-    <h1>🎧 Podcast Digest</h1>
-    <div class="date">${dateStr}</div>
-    <div class="count">过去24小时共处理 ${episodes.length} 个剧集</div>
+<body style="margin:0;padding:0;background:#f0f2f5;color:#333;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
+<div style="max-width:780px;margin:0 auto;background:#fff;">
+  <div style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);background-color:#5a4dd1;color:#ffffff;padding:32px;text-align:center;">
+    <h1 style="margin:0;font-size:26px;color:#ffffff;letter-spacing:1px;">🎧 Podcast Digest</h1>
+    <div style="margin-top:8px;font-size:15px;color:#ffffff;opacity:0.95;">${dateStr}</div>
+    <div style="margin-top:4px;font-size:13px;color:#ffffff;opacity:0.85;">过去24小时共处理 ${episodes.length} 个剧集</div>
   </div>
-${audioUrl ? `  <div class="audio-section">
-    <h2>🎙️ 今日播客速览（语音版）</h2>
-    <div class="audio-meta">约 ${audioDurationMin || 30} 分钟 &nbsp;·&nbsp; 双主持人深度对话</div>
-    <a href="${escapeHtml(audioUrl)}" class="audio-btn" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;text-decoration:none;border-radius:30px;font-size:15px;font-weight:600;">▶ 点击收听</a>
+${audioUrl ? `  <div style="padding:24px 30px;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);background-color:#1a1a2e;color:#ffffff;text-align:center;">
+    <div style="font-size:13px;color:#ffd966;font-weight:600;letter-spacing:1px;margin-bottom:8px;">⭐ 今日 30 分钟精华播报</div>
+    <h2 style="margin:0 0 8px 0;font-size:20px;color:#ffffff;letter-spacing:0.5px;">🎙️ 一键收听今日播客速览</h2>
+    <div style="font-size:13px;color:#a8b2cf;margin-bottom:16px;">约 ${audioDurationMin || 30} 分钟 &nbsp;·&nbsp; AI 智能编辑播报</div>
+    <a href="${escapeHtml(audioUrl)}" style="display:inline-block;padding:14px 36px;background:linear-gradient(135deg,#667eea,#764ba2);background-color:#667eea;color:#ffffff;text-decoration:none;border-radius:30px;font-size:16px;font-weight:600;letter-spacing:0.5px;">▶ 点击收听 30 分钟精华</a>
+    <div style="margin-top:12px;font-size:11px;color:#7a86a8;">链接长期有效 · 也可在 <a href="https://podcast-digest-production.up.railway.app/" style="color:#a8b2cf;text-decoration:underline;">WebUI</a> 收听</div>
   </div>` : ''}`;
 
   // Table of contents
