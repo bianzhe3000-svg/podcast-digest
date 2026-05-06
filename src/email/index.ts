@@ -12,7 +12,7 @@ import { logger } from '../utils/logger';
 import { getDatabase, AnalysisResult, Episode, Podcast } from '../database';
 import { readMarkdown } from '../markdown';
 import { generateDigestPdf, PdfEpisodeData } from '../markdown/pdf';
-import { generateDailyDialogue, estimateAudioDuration, AUDIO_DIR } from '../audio/dialogue';
+import { generateDailyDialogue, estimateAudioDuration, getAudioDurationMin, AUDIO_DIR } from '../audio/dialogue';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -571,9 +571,10 @@ export async function sendDailyDigest(sinceHours: number = 24): Promise<{
           ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
           : 'https://podcast-digest-production.up.railway.app';
         audioUrl = `${baseUrl}/api/audio/${existingDigest.audio_filename}`;
-        audioDurationMin = estimateAudioDuration(existingDigest.audio_filename);
+        // 用 ffprobe 取真实时长
+        audioDurationMin = await getAudioDurationMin(existingDigest.audio_filename);
         needsGenerate = false;
-        logger.info('Email reusing existing digest from DB', { date: today, audio: audioUrl, summaryChars: dailySummary.length });
+        logger.info('Email reusing existing digest from DB', { date: today, audio: audioUrl, durationMin: audioDurationMin, summaryChars: dailySummary.length });
       } else {
         logger.warn('Existing digest record found but audio file missing on disk, regenerating');
       }
@@ -590,7 +591,7 @@ export async function sendDailyDigest(sinceHours: number = 24): Promise<{
             ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
             : 'https://podcast-digest-production.up.railway.app';
           audioUrl = `${baseUrl}/api/audio/${result.audioFilename}`;
-          audioDurationMin = estimateAudioDuration(result.audioFilename);
+          audioDurationMin = await getAudioDurationMin(result.audioFilename);
         }
       } else {
         logger.warn('generateAndSaveDigest failed, sending email with what we have', { error: result.error });

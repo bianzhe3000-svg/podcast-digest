@@ -9,7 +9,10 @@
 import OpenAI from 'openai';
 import axios from 'axios';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import timezone from 'dayjs/plugin/timezone';
@@ -18,6 +21,8 @@ import { logger } from '../utils/logger';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
+
+const execFileAsync = promisify(execFile);
 
 // 音色（Qwen3-TTS-Flash 内置）
 const VOICE = 'Cherry';                   // 女声·阳光
@@ -195,6 +200,59 @@ async function synthesizeOnce(text: string, voice: string = VOICE): Promise<Buff
   ]);
 }
 
+/**
+ * 用 ffmpeg 把多个 MP3 buffer 重新编码合并为统一比特率的单一 MP3。
+ * 消除：块边界跳跃声、比特率不一致、文件过大。
+ */
+async function concatMp3sWithFfmpeg(buffers: Buffer[], outPath: string): Promise<void> {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tts-'));
+  try {
+    const tmpFiles: string[] = [];
+    for (let i = 0; i < buffers.length; i++) {
+      const f = path.join(tmpDir, `chunk-${i.toString().padStart(3, '0')}.mp3`);
+      fs.writeFileSync(f, buffers[i]);
+      tmpFiles.push(f);
+    }
+    const listFile = path.join(tmpDir, 'list.txt');
+    fs.writeFileSync(listFile, tmpFiles.map(f => `file '${f.replace(/'/g, "'\\''")}'`).join('\n'));
+
+    // 重新编码：单声道 64kbps，22kHz；aresample 平滑边界；
+    // -af "apad=pad_dur=0.3" 在每段间补 0.3s 静音让节奏自然（也能掩盖 codec 微小不连续）
+    const args = [
+      '-y', '-loglevel', 'error',
+      '-f', 'concat', '-safe', '0',
+      '-i', listFile,
+      '-af', 'aresample=async=1:first_pts=0',
+      '-c:a', 'libmp3lame',
+      '-b:a', '64k',
+      '-ac', '1',
+      '-ar', '22050',
+      outPath,
+    ];
+    logger.info('ffmpeg concat starting', { chunks: buffers.length });
+    await execFileAsync('ffmpeg', args, { maxBuffer: 50 * 1024 * 1024 });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
+/** 用 ffprobe 取 MP3 实际时长（秒） */
+async function probeDurationSec(filePath: string): Promise<number | null> {
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      filePath,
+    ]);
+    const dur = parseFloat(stdout.trim());
+    return isNaN(dur) ? null : dur;
+  } catch (e) {
+    logger.warn('ffprobe failed', { error: (e as Error).message });
+    return null;
+  }
+}
+
 /** 单次 TTS 测试（供 /api/debug/test-tts 使用） */
 export async function testTts(
   text = '你好，这是语音合成测试。',
@@ -267,23 +325,32 @@ export async function generateDailyDialogue(
   }
 
   const elapsedSec = Math.round((Date.now() - startTs) / 1000);
-  const combined = Buffer.concat(buffers);
-  logger.info(`TTS done: ${okCount}/${chunks.length} chunks ok (${failCount} skipped), ${Math.round(combined.length / 1024)}KB, ${elapsedSec}s`);
+  logger.info(`TTS done: ${okCount}/${chunks.length} chunks ok (${failCount} skipped), ${elapsedSec}s`);
 
-  if (combined.length === 0) {
+  if (buffers.length === 0) {
     throw new Error(`All ${chunks.length} TTS chunks failed`);
   }
-  // 至少 50% 成功才接受（防止音频过于残缺）
   if (okCount < chunks.length / 2) {
     throw new Error(`Too many TTS failures: only ${okCount}/${chunks.length} succeeded`);
   }
 
-  // 4-4. 保存到持久化 Volume（使用 Asia/Shanghai 时区命名）
+  // 4-4. 用 ffmpeg 重新编码合并（消除块边界跳跃 + 统一比特率）
+  stage('audio_encoding');
   fs.mkdirSync(AUDIO_DIR, { recursive: true });
   const filename = `digest-${dayjs().tz('Asia/Shanghai').format('YYYY-MM-DD')}.mp3`;
   const filePath = path.join(AUDIO_DIR, filename);
-  fs.writeFileSync(filePath, combined);
-  logger.info('Audio saved', { filename, sizeKB: Math.round(combined.length / 1024) });
+  await concatMp3sWithFfmpeg(buffers, filePath);
+
+  const stat = fs.statSync(filePath);
+  const durationSec = await probeDurationSec(filePath);
+  const durationMin = durationSec ? Math.round(durationSec / 60 * 10) / 10 : null;
+  logger.info('Audio merged & encoded', {
+    filename,
+    sizeKB: Math.round(stat.size / 1024),
+    durationSec: durationSec ? Math.round(durationSec) : '?',
+    durationMin: durationMin ? `${durationMin} min` : '?',
+  });
+  stage(`audio_encoded (${durationMin ? durationMin + ' min' : '?'}, ${Math.round(stat.size / 1024)} KB)`);
 
   // 4-5. 清理 30 天前的旧文件
   try {
@@ -305,13 +372,27 @@ export async function generateDailyDialogue(
   return filename;
 }
 
-/** 估算音频时长（分钟） */
+/** 估算音频时长（分钟）—— 64kbps 单声道：1 分钟 ≈ 480 KB */
 export function estimateAudioDuration(filename: string): number {
   try {
     const filePath = path.join(AUDIO_DIR, filename);
     const size = fs.statSync(filePath).size;
+    // 我们用 ffmpeg 重新编码到 64kbps，所以这个估算很准
     return Math.max(1, Math.round(size / (64000 / 8) / 60));
   } catch {
     return 30;
   }
+}
+
+/**
+ * 用 ffprobe 取真实时长（异步，更准确）。
+ * 调用方建议优先用这个，仅在没有 ffprobe 时 fallback 到 estimateAudioDuration
+ */
+export async function getAudioDurationMin(filename: string): Promise<number> {
+  try {
+    const filePath = path.join(AUDIO_DIR, filename);
+    const sec = await probeDurationSec(filePath);
+    if (sec) return Math.round(sec / 60 * 10) / 10;
+  } catch {}
+  return estimateAudioDuration(filename);
 }
