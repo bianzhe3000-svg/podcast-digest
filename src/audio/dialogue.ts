@@ -216,13 +216,25 @@ async function concatMp3sWithFfmpeg(buffers: Buffer[], outPath: string): Promise
     const listFile = path.join(tmpDir, 'list.txt');
     fs.writeFileSync(listFile, tmpFiles.map(f => `file '${f.replace(/'/g, "'\\''")}'`).join('\n'));
 
-    // 重新编码：单声道 64kbps，22kHz；aresample 平滑边界；
-    // -af "apad=pad_dur=0.3" 在每段间补 0.3s 静音让节奏自然（也能掩盖 codec 微小不连续）
+    // 重新编码：单声道 64kbps 22kHz
+    // 滤镜链处理：
+    //   1. aresample 平滑边界
+    //   2. dynaudnorm 动态音量归一化（处理段落间音量不一致问题）
+    //      - f=150ms 帧大小（短，反应快）
+    //      - g=15 高斯滤波窗口（平滑过渡）
+    //      - p=0.95 峰值阈值（保留 5% 动态范围）
+    //   3. loudnorm 整体响度归一化到 -16 LUFS（播客行业标准）
+    //      - TP=-1.5 真峰值 -1.5 dB（防爆音）
+    const filterChain = [
+      'aresample=async=1:first_pts=0',
+      'dynaudnorm=f=150:g=15:p=0.95',
+      'loudnorm=I=-16:TP=-1.5:LRA=11',
+    ].join(',');
     const args = [
       '-y', '-loglevel', 'error',
       '-f', 'concat', '-safe', '0',
       '-i', listFile,
-      '-af', 'aresample=async=1:first_pts=0',
+      '-af', filterChain,
       '-c:a', 'libmp3lame',
       '-b:a', '64k',
       '-ac', '1',
