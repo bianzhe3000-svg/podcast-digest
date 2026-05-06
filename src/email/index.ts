@@ -1,6 +1,8 @@
 import nodemailer from 'nodemailer';
 import dns from 'dns';
 import axios from 'axios';
+import fs from 'fs';
+import path from 'path';
 import { Resend } from 'resend';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
@@ -10,7 +12,7 @@ import { logger } from '../utils/logger';
 import { getDatabase, AnalysisResult, Episode, Podcast } from '../database';
 import { readMarkdown } from '../markdown';
 import { generateDigestPdf, PdfEpisodeData } from '../markdown/pdf';
-import { generateDailyDialogue, estimateAudioDuration } from '../audio/dialogue';
+import { generateDailyDialogue, estimateAudioDuration, AUDIO_DIR } from '../audio/dialogue';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -570,10 +572,6 @@ export async function sendDailyDigest(sinceHours: number = 24): Promise<{
     let needsGenerate = true;
 
     if (existingDigest && existingDigest.summary && existingDigest.audio_filename) {
-      // 检查 audio 文件是否还在磁盘上
-      const fs = await import('fs');
-      const path = await import('path');
-      const { AUDIO_DIR } = await import('../audio/dialogue');
       const audioPath = path.join(AUDIO_DIR, existingDigest.audio_filename);
       if (fs.existsSync(audioPath)) {
         dailySummary = existingDigest.summary;

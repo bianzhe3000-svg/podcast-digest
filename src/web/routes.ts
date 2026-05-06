@@ -665,17 +665,30 @@ router.post('/email/test-connection', async (_req: Request, res: Response) => {
 });
 
 router.post('/email/send-digest', (req: Request, res: Response) => {
-  // 支持自定义时间窗口，默认24小时
   const sinceHours = parseInt(String(req.query.hours || req.body?.hours || ''), 10) || 24;
+  const db = getDatabase();
+  const taskLogId = db.createTaskLog(`send_digest_email_${sinceHours}h`);
+  db.updateTaskLog(taskLogId, { error_details: '[stage] starting' });
 
-  // 立即返回，避免 Railway 代理 30s 超时（生成摘要+PDF 耗时较长）
-  res.json({ success: true, data: { message: '邮件发送任务已启动（后台处理）', sinceHours } });
+  res.json({ success: true, data: { message: '邮件发送任务已启动（后台处理）', sinceHours, taskLogId } });
 
-  // 后台异步执行
+  // 后台异步执行，用 task_log 追踪进度
   sendDailyDigest(sinceHours).then(result => {
+    db.updateTaskLog(taskLogId, {
+      status: result.sent ? 'completed' : 'failed',
+      total_episodes: result.episodeCount,
+      processed_episodes: result.sent ? result.episodeCount : 0,
+      error_details: result.sent ? `sent to ${config.email.toAddress}` : (result.error || 'unknown'),
+    });
     logger.info('send-digest completed', result);
   }).catch(err => {
-    logger.error('send-digest failed', { error: (err as Error).message });
+    const msg = (err as Error).message;
+    const stack = (err as Error).stack?.split('\n').slice(0, 5).join(' | ') || '';
+    db.updateTaskLog(taskLogId, {
+      status: 'failed',
+      error_details: `EXCEPTION: ${msg.slice(0, 100)} | ${stack.slice(0, 200)}`,
+    });
+    logger.error('send-digest failed', { error: msg, stack });
   });
 });
 
