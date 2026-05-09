@@ -10,7 +10,7 @@ import { listMarkdownFiles, listMarkdownFilesWithMeta, readMarkdown } from '../m
 import { exportToPdf } from '../markdown/pdf';
 import { logger } from '../utils/logger';
 import { AUDIO_DIR } from '../audio/dialogue';
-import { TEMP_ASR_DIR, cleanupTempAsrFiles } from '../audio';
+import { TEMP_ASR_DIR, cleanupTempAsrFiles, recentAsrStats } from '../audio';
 import OpenAI from 'openai';
 import path from 'path';
 import fs from 'fs';
@@ -1158,6 +1158,30 @@ router.post('/debug/cleanup-temp-asr', (_req: Request, res: Response) => {
   } catch (err) {
     res.status(500).json({ success: false, error: (err as Error).message });
   }
+});
+
+// 查看最近 20 次 ASR 预处理的精确统计（输入/输出时长 + 节省成本）
+router.get('/debug/asr-stats', (_req: Request, res: Response) => {
+  const aggregate = recentAsrStats.reduce((acc, s) => ({
+    count: acc.count + 1,
+    totalInputSec: acc.totalInputSec + s.inputDurSec,
+    totalOutputSec: acc.totalOutputSec + s.outputDurSec,
+    totalSavedCny: acc.totalSavedCny + s.savedCny,
+  }), { count: 0, totalInputSec: 0, totalOutputSec: 0, totalSavedCny: 0 });
+  const avgReduction = aggregate.totalInputSec > 0
+    ? Math.round((1 - aggregate.totalOutputSec / aggregate.totalInputSec) * 100)
+    : 0;
+  res.json({
+    success: true,
+    data: {
+      summary: {
+        ...aggregate,
+        totalSavedCny: parseFloat(aggregate.totalSavedCny.toFixed(4)),
+        avgReductionPct: avgReduction,
+      },
+      recent: recentAsrStats,
+    },
+  });
 });
 
 // === Settings (non-sensitive) ===

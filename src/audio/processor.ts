@@ -14,6 +14,28 @@ function getTempAsrDir(): string {
 }
 export const TEMP_ASR_DIR = getTempAsrDir();
 
+/** ASR 预处理统计（最近 20 次，供 /api/debug/asr-stats 查询） */
+export interface AsrStats {
+  timestamp: string;
+  episodeTitle?: string;
+  inputDurSec: number;
+  outputDurSec: number;
+  durReductionPct: number;
+  inputMB: number;
+  outputMB: number;
+  sizeReductionPct: number;
+  speedFactor: number;
+  oldCostCny: number;     // 旧方案（按原始时长）成本
+  newCostCny: number;     // 新方案（按预处理后时长）成本
+  savedCny: number;
+}
+const PARAFORMER_RATE_CNY_PER_SEC = 0.00015;
+export const recentAsrStats: AsrStats[] = [];
+function pushStat(s: AsrStats) {
+  recentAsrStats.unshift(s);
+  if (recentAsrStats.length > 20) recentAsrStats.length = 20;
+}
+
 export function hasFFmpeg(): boolean {
   try {
     execSync('ffmpeg -version', { stdio: 'ignore' });
@@ -191,6 +213,8 @@ export function preprocessForAsr(
   const outputDur = getAudioDuration(outputPath);
   const durReduction = inputDur > 0 ? Math.round((1 - outputDur / inputDur) * 100) : 0;
   const sizeReduction = Math.round((1 - outputSize / inputSize) * 100);
+  const oldCost = inputDur * PARAFORMER_RATE_CNY_PER_SEC;
+  const newCost = outputDur * PARAFORMER_RATE_CNY_PER_SEC;
 
   logger.info('ASR preprocessing done', {
     inputDurSec: Math.round(inputDur),
@@ -200,6 +224,20 @@ export function preprocessForAsr(
     outputMB: (outputSize / 1024 / 1024).toFixed(1),
     sizeReduction: `${sizeReduction}%`,
     asrCostReduction: `~${durReduction}%`,
+  });
+
+  pushStat({
+    timestamp: new Date().toISOString(),
+    inputDurSec: Math.round(inputDur),
+    outputDurSec: Math.round(outputDur),
+    durReductionPct: durReduction,
+    inputMB: parseFloat((inputSize / 1024 / 1024).toFixed(2)),
+    outputMB: parseFloat((outputSize / 1024 / 1024).toFixed(2)),
+    sizeReductionPct: sizeReduction,
+    speedFactor,
+    oldCostCny: parseFloat(oldCost.toFixed(4)),
+    newCostCny: parseFloat(newCost.toFixed(4)),
+    savedCny: parseFloat((oldCost - newCost).toFixed(4)),
   });
 
   return outputPath;
