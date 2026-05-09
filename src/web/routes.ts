@@ -10,6 +10,7 @@ import { listMarkdownFiles, listMarkdownFilesWithMeta, readMarkdown } from '../m
 import { exportToPdf } from '../markdown/pdf';
 import { logger } from '../utils/logger';
 import { AUDIO_DIR } from '../audio/dialogue';
+import { TEMP_ASR_DIR, cleanupTempAsrFiles } from '../audio';
 import OpenAI from 'openai';
 import path from 'path';
 import fs from 'fs';
@@ -1131,6 +1132,32 @@ router.get('/audio/:filename', (req: Request, res: Response) => {
   res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
   res.setHeader('Accept-Ranges', 'bytes');
   fs.createReadStream(filePath).pipe(res);
+});
+
+// === Temp ASR audio serving ===
+// 供 Paraformer 拉取预处理后的音频，使用完后删除
+router.get('/temp-audio/:filename', (req: Request, res: Response) => {
+  const filename = String(req.params.filename).replace(/[^a-zA-Z0-9\-_.]/g, '');
+  const filePath = path.join(TEMP_ASR_DIR, filename);
+  if (!fs.existsSync(filePath)) {
+    res.status(404).json({ error: 'Temp audio file not found' });
+    return;
+  }
+  const stat = fs.statSync(filePath);
+  res.setHeader('Content-Type', 'audio/mpeg');
+  res.setHeader('Content-Length', stat.size);
+  res.setHeader('Accept-Ranges', 'bytes');
+  fs.createReadStream(filePath).pipe(res);
+});
+
+// 手动清理超过 60 分钟的 temp-asr 文件（兜底）
+router.post('/debug/cleanup-temp-asr', (_req: Request, res: Response) => {
+  try {
+    const removed = cleanupTempAsrFiles(60);
+    res.json({ success: true, data: { removed } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
 });
 
 // === Settings (non-sensitive) ===

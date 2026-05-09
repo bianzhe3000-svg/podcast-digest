@@ -108,12 +108,15 @@ export const config = {
 export function ensureDirectories(): void {
   const audioDir = process.env.AUDIO_DIR
     || path.join(path.dirname(config.database.path), 'audio');
+  const tempAsrDir = process.env.TEMP_ASR_DIR
+    || path.join(path.dirname(config.database.path), 'temp-asr');
   const dirs = [
     path.dirname(config.database.path),
     config.storage.summariesDir,
     config.storage.tempDir,
     path.dirname(config.logging.file),
     audioDir,
+    tempAsrDir,
   ];
   for (const dir of dirs) {
     if (!fs.existsSync(dir)) {

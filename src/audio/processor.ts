@@ -1,7 +1,18 @@
 import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { config } from '../config';
 import { logger } from '../utils/logger';
+
+/**
+ * 临时 ASR 音频目录（与数据库同 Volume，重新部署不丢失）
+ * 仅在调用 speedUpAndCompress 时按需创建
+ */
+function getTempAsrDir(): string {
+  return process.env.TEMP_ASR_DIR
+    || path.join(path.dirname(config.database.path), 'temp-asr');
+}
+export const TEMP_ASR_DIR = getTempAsrDir();
 
 export function hasFFmpeg(): boolean {
   try {
@@ -90,6 +101,128 @@ export function splitAudio(inputPath: string, outputDir: string, maxSizeMB: numb
 
   logger.info(`Audio split into ${chunks.length} chunks`);
   return chunks;
+}
+
+/**
+ * ASR 预处理：广告剪除 + 静音裁剪 + 加速 + 压缩
+ * 用于发给 Paraformer 之前减少计费时长。
+ *
+ * 处理链：
+ *   1. 跳过开头 N 秒（默认 60s，多数播客开头是广告/片头）
+ *   2. 截掉结尾 M 秒（默认 30s，多数播客结尾是广告/片尾）
+ *   3. silenceremove 去掉对话中 ≥2 秒的静音
+ *   4. atempo 加速（默认 1.5x）
+ *   5. 压缩到 32kbps mono 16kHz mp3
+ *
+ * @returns 预处理后文件的本地路径
+ */
+export function preprocessForAsr(
+  inputPath: string,
+  outputDir: string,
+  options: {
+    speedFactor?: number;       // 加速倍率（默认 1.5）
+    skipIntroSec?: number;      // 跳过开头秒数（默认 60）
+    skipOutroSec?: number;      // 截掉结尾秒数（默认 30）
+    silenceThresholdDb?: number; // 静音阈值（默认 -40 dB）
+    silenceMinDurSec?: number;  // 最小静音时长（默认 2 秒）
+  } = {}
+): string {
+  const {
+    speedFactor = 1.5,
+    skipIntroSec = 60,
+    skipOutroSec = 30,
+    silenceThresholdDb = -40,
+    silenceMinDurSec = 2,
+  } = options;
+
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
+  }
+
+  const inputSize = fs.statSync(inputPath).size;
+  const inputDur = getAudioDuration(inputPath);
+
+  // 安全检查：太短的音频不要乱裁，否则可能没内容了
+  const usableSkipIntro = inputDur > skipIntroSec * 4 ? skipIntroSec : 0;
+  const usableSkipOutro = inputDur > (usableSkipIntro + skipOutroSec) * 2 ? skipOutroSec : 0;
+  const usableDur = inputDur - usableSkipIntro - usableSkipOutro;
+
+  // ffmpeg atempo 仅支持 0.5-2.0；>2.0 链式
+  const atempoFilter = speedFactor <= 2.0
+    ? `atempo=${speedFactor}`
+    : `atempo=2.0,atempo=${speedFactor / 2.0}`;
+
+  // 滤镜链：先去静音，再加速
+  const filterChain = [
+    `silenceremove=stop_periods=-1:stop_duration=${silenceMinDurSec}:stop_threshold=${silenceThresholdDb}dB`,
+    atempoFilter,
+  ].join(',');
+
+  const filename = `asr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.mp3`;
+  const outputPath = path.join(outputDir, filename);
+
+  logger.info('ASR preprocessing audio', {
+    speedFactor,
+    inputDurSec: Math.round(inputDur),
+    skipIntroSec: usableSkipIntro,
+    skipOutroSec: usableSkipOutro,
+    inputMB: (inputSize / 1024 / 1024).toFixed(1),
+  });
+
+  // -ss 在 -i 之前是 fast seek（不解码），在之后是 accurate seek
+  // 我们用 -ss <secs> -t <usableDur> 切窗口
+  const args = [
+    `-ss ${usableSkipIntro}`,
+    `-t ${usableDur}`,
+    `-i "${inputPath}"`,
+    `-af "${filterChain}"`,
+    '-acodec libmp3lame',
+    '-ab 32k',
+    '-ar 16000',
+    '-ac 1',
+    `"${outputPath}"`,
+    '-y',
+    '-loglevel error',
+  ].join(' ');
+
+  execSync(`ffmpeg ${args}`, { timeout: 600000 });
+
+  const outputSize = fs.statSync(outputPath).size;
+  const outputDur = getAudioDuration(outputPath);
+  const durReduction = inputDur > 0 ? Math.round((1 - outputDur / inputDur) * 100) : 0;
+  const sizeReduction = Math.round((1 - outputSize / inputSize) * 100);
+
+  logger.info('ASR preprocessing done', {
+    inputDurSec: Math.round(inputDur),
+    outputDurSec: Math.round(outputDur),
+    durReduction: `${durReduction}%`,
+    inputMB: (inputSize / 1024 / 1024).toFixed(1),
+    outputMB: (outputSize / 1024 / 1024).toFixed(1),
+    sizeReduction: `${sizeReduction}%`,
+    asrCostReduction: `~${durReduction}%`,
+  });
+
+  return outputPath;
+}
+
+/**
+ * 清理 TEMP_ASR_DIR 中超过指定时间的文件（兜底，正常每集完成后会清理）
+ */
+export function cleanupTempAsrFiles(maxAgeMinutes: number = 60): number {
+  const dir = TEMP_ASR_DIR;
+  if (!fs.existsSync(dir)) return 0;
+  const cutoff = Date.now() - maxAgeMinutes * 60 * 1000;
+  let removed = 0;
+  for (const f of fs.readdirSync(dir)) {
+    const fp = path.join(dir, f);
+    try {
+      if (fs.statSync(fp).mtimeMs < cutoff) {
+        fs.unlinkSync(fp);
+        removed++;
+      }
+    } catch {}
+  }
+  return removed;
 }
 
 export async function prepareAudioForUpload(
