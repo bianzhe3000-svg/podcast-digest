@@ -245,13 +245,18 @@ router.get('/episodes/:id/analysis', (req: Request, res: Response) => {
       res.status(404).json({ success: false, error: 'Analysis not found' });
       return;
     }
+    // knowledge_points 是纯文本（fullRecap），不是 JSON。其他三个是 JSON 字符串。
+    const safeParse = (s: string | null | undefined) => {
+      if (!s) return null;
+      try { return JSON.parse(s); } catch { return s; }
+    };
     res.json({
       success: true,
       data: {
         ...result,
-        key_points: JSON.parse(result.key_points),
-        arguments: JSON.parse(result.arguments),
-        knowledge_points: JSON.parse(result.knowledge_points),
+        key_points: safeParse(result.key_points),
+        arguments: safeParse(result.arguments),
+        knowledge_points: result.knowledge_points,  // 纯文本，不解析
       },
     });
   } catch (error) {
