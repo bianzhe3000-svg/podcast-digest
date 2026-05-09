@@ -1,13 +1,20 @@
 import fs from 'fs';
 import pLimit from 'p-limit';
+import path from 'path';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { getDatabase, Episode } from '../database';
 import { parseFeed } from '../rss';
-import { downloadAudio } from '../audio';
+import { downloadAudio, speedUpAndCompress, TEMP_ASR_DIR, hasFFmpeg } from '../audio';
 import { transcribeAudio } from '../transcription';
 import { analyzeContent } from '../analysis';
 import { generateMarkdown, saveMarkdown, MarkdownInput } from '../markdown';
+
+// ASR 加速倍率：通过环境变量 ASR_SPEED_FACTOR 控制
+// 默认 1.5x（节省 33% ASR 成本，准确率几乎不变）
+// 设为 1.0 关闭加速（恢复直接传 RSS URL）
+// 设为 2.0 节省 50%（准确率轻微下降）
+const ASR_SPEED_FACTOR = parseFloat(process.env.ASR_SPEED_FACTOR || '1.5');
 
 export interface ProcessingResult {
   status: 'success' | 'failed' | 'skipped';
@@ -50,17 +57,39 @@ export async function processEpisode(
   logger.info(`Processing episode: ${episode.title}`, { episodeId: episode.id });
 
   let audioPath: string | null = null;
+  let spedUpAudioPath: string | null = null;  // 加速后的临时音频（ASR 完成后清理）
   const useDashScopeTranscription = config.transcriptionProvider === 'dashscope';
 
   try {
     let transcription: { text: string; language: string; duration?: number };
 
     if (useDashScopeTranscription) {
-      // DashScope Paraformer: 直接传 URL，跳过下载/压缩/分割
-      logger.info('Step 1/4: Skipping download (DashScope uses URL directly)');
-      logger.info('Step 2/4: Transcribing audio via Paraformer');
-      transcription = await transcribeAudio('', episode.audio_url);
-      logMemory('after transcription');
+      // 决定是否预处理（加速 + 压缩）以降低 ASR 计费时长
+      const shouldSpeedUp = ASR_SPEED_FACTOR > 1.0 && hasFFmpeg();
+
+      if (shouldSpeedUp) {
+        logger.info(`Step 1/4: Downloading + speeding up audio ${ASR_SPEED_FACTOR}x (saves ~${Math.round((1 - 1 / ASR_SPEED_FACTOR) * 100)}% ASR cost)`);
+        audioPath = await downloadAudio(episode.audio_url, config.storage.tempDir);
+        logMemory('after download');
+
+        spedUpAudioPath = speedUpAndCompress(audioPath, TEMP_ASR_DIR, ASR_SPEED_FACTOR);
+        // 拼出我们自己的 URL 给 Paraformer 拉取
+        const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+          ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+          : 'https://podcast-digest-production.up.railway.app';
+        const filename = path.basename(spedUpAudioPath);
+        const spedUpUrl = `${baseUrl}/api/temp-audio/${filename}`;
+
+        logger.info('Step 2/4: Transcribing accelerated audio via Paraformer', { url: spedUpUrl });
+        transcription = await transcribeAudio('', spedUpUrl);
+        logMemory('after transcription');
+      } else {
+        // 关闭加速：直接走 RSS URL
+        logger.info('Step 1/4: Skipping download (DashScope uses URL directly)');
+        logger.info('Step 2/4: Transcribing audio via Paraformer');
+        transcription = await transcribeAudio('', episode.audio_url);
+        logMemory('after transcription');
+      }
     } else {
       // OpenAI Whisper: 需要先下载再转录
       logger.info('Step 1/4: Downloading audio');
@@ -145,6 +174,10 @@ export async function processEpisode(
     // Cleanup downloaded audio
     if (audioPath && fs.existsSync(audioPath)) {
       try { fs.unlinkSync(audioPath); } catch {}
+    }
+    // Cleanup sped-up temp audio (Paraformer 已转录完成，不需要再保留)
+    if (spedUpAudioPath && fs.existsSync(spedUpAudioPath)) {
+      try { fs.unlinkSync(spedUpAudioPath); } catch {}
     }
   }
 }

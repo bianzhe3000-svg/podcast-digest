@@ -5,6 +5,7 @@ import { config, ensureDirectories } from './config';
 import { logger } from './utils/logger';
 import { getDatabase } from './database';
 import { startScheduler } from './scheduler';
+import { cleanupTempAsrFiles } from './audio/processor';
 import apiRoutes from './web/routes';
 
 // Force Node.js to prefer IPv4 globally (fixes Railway IPv6 connection failures)
@@ -51,6 +52,16 @@ const server = app.listen(port, host, () => {
 
   // Initialize database
   getDatabase();
+
+  // Auto-cleanup temp ASR files: every hour, remove files older than 1 hour
+  setInterval(() => {
+    try {
+      const removed = cleanupTempAsrFiles(60);
+      if (removed > 0) logger.info(`Hourly cleanup: removed ${removed} temp-asr files`);
+    } catch (e) {
+      logger.warn('Temp ASR cleanup failed', { error: (e as Error).message });
+    }
+  }, 60 * 60 * 1000);
 
   // Auto-start scheduler if enabled
   if (config.scheduler.enabled) {
