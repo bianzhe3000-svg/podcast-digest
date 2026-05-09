@@ -12,8 +12,11 @@ import { generateMarkdown, saveMarkdown, MarkdownInput } from '../markdown';
 
 // ASR 预处理参数（环境变量可覆盖）：
 // 设 ASR_SPEED_FACTOR=1.0 完全关闭预处理，恢复直接传 RSS URL
-// 默认 2.0x：节省 50%+ ASR 时长成本，准确率小幅下降可接受
-const ASR_SPEED_FACTOR = parseFloat(process.env.ASR_SPEED_FACTOR || '2.0');
+// 默认 1.5x：节省 33% ASR 时长成本，transcript 质量损失 <20%（实测）
+//
+// ⚠️ 不要设 2.0x：实测中文 Paraformer 在 2.0x 速度下识别能力崩溃，
+// transcript 字符数会丢失 ~79%（远超 50% 的时长削减），关键词丢失 33%。
+const ASR_SPEED_FACTOR = parseFloat(process.env.ASR_SPEED_FACTOR || '1.5');
 const ASR_SKIP_INTRO_SEC = parseInt(process.env.ASR_SKIP_INTRO_SEC || '60', 10);
 const ASR_SKIP_OUTRO_SEC = parseInt(process.env.ASR_SKIP_OUTRO_SEC || '30', 10);
 
