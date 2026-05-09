@@ -12,7 +12,8 @@ import { generateMarkdown, saveMarkdown, MarkdownInput } from '../markdown';
 
 // ASR 预处理参数（环境变量可覆盖）：
 // 设 ASR_SPEED_FACTOR=1.0 完全关闭预处理，恢复直接传 RSS URL
-const ASR_SPEED_FACTOR = parseFloat(process.env.ASR_SPEED_FACTOR || '1.5');
+// 默认 2.0x：节省 50%+ ASR 时长成本，准确率小幅下降可接受
+const ASR_SPEED_FACTOR = parseFloat(process.env.ASR_SPEED_FACTOR || '2.0');
 const ASR_SKIP_INTRO_SEC = parseInt(process.env.ASR_SKIP_INTRO_SEC || '60', 10);
 const ASR_SKIP_OUTRO_SEC = parseInt(process.env.ASR_SKIP_OUTRO_SEC || '30', 10);
 
