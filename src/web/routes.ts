@@ -282,17 +282,22 @@ router.post('/episodes/:id/reprocess', (req: Request, res: Response) => {
       return;
     }
 
+    // 可选：用 ?asrSpeed=1.0 覆盖 ASR 加速倍率（用于 A/B 测试）
+    const asrSpeedOverride = req.query.asrSpeed
+      ? parseFloat(String(req.query.asrSpeed))
+      : undefined;
+
     // 删除旧的分析结果，重置状态为 pending
     db.deleteAnalysisResult(episodeId);
     db.updateEpisodeStatus(episodeId, 'pending');
 
     // 创建任务日志
-    const taskLogId = db.createTaskLog(`reprocess_${episode.title}`);
+    const taskLogId = db.createTaskLog(`reprocess_${episode.title}${asrSpeedOverride ? `_speed${asrSpeedOverride}x` : ''}`);
 
-    res.json({ success: true, data: { message: `正在重新处理: ${episode.title}`, taskLogId } });
+    res.json({ success: true, data: { message: `正在重新处理: ${episode.title}`, taskLogId, asrSpeedOverride } });
 
     // 后台异步处理
-    processEpisode(podcast.name, episode).then(result => {
+    processEpisode(podcast.name, episode, { asrSpeedOverride }).then(result => {
       db.updateTaskLog(taskLogId, {
         status: result.status === 'success' ? 'completed' : 'failed',
         total_episodes: 1,

@@ -28,10 +28,12 @@ export interface ProcessingResult {
 
 export async function processEpisode(
   podcastName: string,
-  episode: Episode
+  episode: Episode,
+  options: { asrSpeedOverride?: number } = {}
 ): Promise<ProcessingResult> {
   const startTime = Date.now();
   const db = getDatabase();
+  const asrSpeed = options.asrSpeedOverride ?? ASR_SPEED_FACTOR;
 
   // Check if already processed
   const existing = db.getAnalysisResult(episode.id);
@@ -65,15 +67,15 @@ export async function processEpisode(
     let transcription: { text: string; language: string; duration?: number };
 
     if (useDashScopeTranscription) {
-      const shouldPreprocess = ASR_SPEED_FACTOR > 1.0 && hasFFmpeg();
+      const shouldPreprocess = asrSpeed > 1.0 && hasFFmpeg();
 
       if (shouldPreprocess) {
-        logger.info(`Step 1/4: Downloading + preprocessing audio (speed=${ASR_SPEED_FACTOR}x, skipIntro=${ASR_SKIP_INTRO_SEC}s, skipOutro=${ASR_SKIP_OUTRO_SEC}s, silence-removed)`);
+        logger.info(`Step 1/4: Downloading + preprocessing audio (speed=${asrSpeed}x, skipIntro=${ASR_SKIP_INTRO_SEC}s, skipOutro=${ASR_SKIP_OUTRO_SEC}s, silence-removed)`);
         audioPath = await downloadAudio(episode.audio_url, config.storage.tempDir);
         logMemory('after download');
 
         preprocessedPath = preprocessForAsr(audioPath, TEMP_ASR_DIR, {
-          speedFactor: ASR_SPEED_FACTOR,
+          speedFactor: asrSpeed,
           skipIntroSec: ASR_SKIP_INTRO_SEC,
           skipOutroSec: ASR_SKIP_OUTRO_SEC,
         });
