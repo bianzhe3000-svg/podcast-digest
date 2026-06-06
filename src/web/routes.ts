@@ -11,7 +11,7 @@ import { exportToPdf } from '../markdown/pdf';
 import { logger } from '../utils/logger';
 import { AUDIO_DIR } from '../audio/dialogue';
 import { TEMP_ASR_DIR, cleanupTempAsrFiles, recentAsrStats } from '../audio';
-import { pushDigestToNotion } from '../notion';
+import { pushDigestToNotion, pushHistoricalToNotion } from '../notion';
 import OpenAI from 'openai';
 import path from 'path';
 import fs from 'fs';
@@ -1176,6 +1176,37 @@ router.post('/notion/push', async (req: Request, res: Response) => {
   } catch (err) {
     res.status(500).json({ success: false, error: (err as Error).message });
   }
+});
+
+// 批量推送历史剧集到 Notion（按发布日期分组，每天一页）
+// 用法：POST /api/notion/push-historical?days=120
+// 后台运行，进度写入 task_log.error_details
+router.post('/notion/push-historical', (req: Request, res: Response) => {
+  const days = parseInt(String(req.query.days || req.body?.days || ''), 10) || 120;
+  const db = getDatabase();
+  const taskLogId = db.createTaskLog(`notion_historical_${days}d`);
+  db.updateTaskLog(taskLogId, { error_details: '[stage] starting' });
+
+  res.json({ success: true, data: { message: `开始推送过去 ${days} 天历史剧集到 Notion（后台处理）`, taskLogId } });
+
+  const onProgress = (msg: string) => {
+    try { db.updateTaskLog(taskLogId, { error_details: `[progress] ${msg}` }); } catch {}
+  };
+
+  pushHistoricalToNotion(days, onProgress).then(result => {
+    db.updateTaskLog(taskLogId, {
+      status: result.ok ? 'completed' : 'failed',
+      total_episodes: result.episodesPushed,
+      processed_episodes: result.episodesPushed,
+      error_details: result.ok
+        ? `推送完成：${result.daysPushed} 天 / ${result.episodesPushed} 集`
+        : (result.error || 'unknown'),
+    });
+    logger.info('Notion historical push done', result);
+  }).catch(err => {
+    db.updateTaskLog(taskLogId, { status: 'failed', error_details: (err as Error).message });
+    logger.error('Notion historical push exception', { error: (err as Error).message });
+  });
 });
 
 // 手动清理超过 60 分钟的 temp-asr 文件（兜底）
