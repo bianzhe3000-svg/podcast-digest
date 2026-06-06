@@ -12,8 +12,23 @@ import { logger } from '../utils/logger';
 import { getDatabase } from '../database';
 
 const DEFAULT_DB_ID = '3771cbd22f9c804fac3bd707096956ea';
+// 该数据库的 data source ID（SDK v5 查询需要它）
+const DEFAULT_DATA_SOURCE_ID = '3771cbd2-2f9c-8066-9ca9-000b75bdf0ac';
 const NOTION_TEXT_LIMIT = 1800;  // 单 rich_text 上限 2000，留余量
 const NOTION_BLOCK_BATCH = 90;   // 单次 append 上限 100，留余量
+
+/** 解析数据库的 data source ID（SDK v5 query 用），失败则回退默认值 */
+async function resolveDataSourceId(notion: Client, dbId: string): Promise<string> {
+  if (process.env.NOTION_DATA_SOURCE_ID) return process.env.NOTION_DATA_SOURCE_ID;
+  try {
+    const db: any = await (notion as any).databases.retrieve({ database_id: dbId });
+    const ds = db?.data_sources?.[0]?.id;
+    if (ds) return ds;
+  } catch (err) {
+    logger.warn('resolveDataSourceId failed, using default', { error: (err as Error).message });
+  }
+  return DEFAULT_DATA_SOURCE_ID;
+}
 
 // ── 通用 episode 结构 ───────────────────────────────────────────────────────
 interface DigestEp {
@@ -209,20 +224,18 @@ export async function pushDigestToNotion(date: string): Promise<{
 let historicalPushRunning = false;
 
 /** 查询 Notion 数据库中已存在的页面标题集合（用于去重） */
-async function getExistingTitles(notion: Client, dbId: string): Promise<Set<string>> {
+async function getExistingTitles(notion: Client, dataSourceId: string): Promise<Set<string>> {
   const titles = new Set<string>();
   let cursor: string | undefined = undefined;
   try {
     do {
-      const resp: any = await (notion as any).databases.query({
-        database_id: dbId,
+      const resp: any = await (notion as any).dataSources.query({
+        data_source_id: dataSourceId,
         start_cursor: cursor,
         page_size: 100,
       });
       for (const page of resp.results || []) {
-        // 标题属性名是「名称」
-        const titleProp = page.properties?.['名称'];
-        const t = titleProp?.title?.map((x: any) => x.plain_text).join('') || '';
+        const t = page.properties?.['名称']?.title?.map((x: any) => x.plain_text).join('') || '';
         if (t) titles.add(t);
       }
       cursor = resp.has_more ? resp.next_cursor : undefined;
@@ -247,12 +260,13 @@ export async function archiveHistoricalPages(
   const notion = new Client({ auth: apiKey });
 
   try {
+    const dataSourceId = await resolveDataSourceId(notion, dbId);
     let archived = 0;
     let cursor: string | undefined = undefined;
     let scanned = 0;
     do {
-      const resp: any = await (notion as any).databases.query({
-        database_id: dbId,
+      const resp: any = await (notion as any).dataSources.query({
+        data_source_id: dataSourceId,
         start_cursor: cursor,
         page_size: 100,
       });
@@ -320,7 +334,8 @@ export async function pushHistoricalToNotion(
     // 去重：拉取已存在页面标题，跳过已推送的日期
     const notion = new Client({ auth: apiKey });
     onProgress?.(`分为 ${dates.length} 个日期，正在检查已存在页面以去重...`);
-    const existing = await getExistingTitles(notion, dbId);
+    const dataSourceId = await resolveDataSourceId(notion, dbId);
+    const existing = await getExistingTitles(notion, dataSourceId);
     onProgress?.(`已存在 ${existing.size} 个页面，开始逐日推送（跳过重复）...`);
 
     const pages: string[] = [];
