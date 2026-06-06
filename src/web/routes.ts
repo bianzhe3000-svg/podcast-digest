@@ -11,7 +11,7 @@ import { exportToPdf } from '../markdown/pdf';
 import { logger } from '../utils/logger';
 import { AUDIO_DIR } from '../audio/dialogue';
 import { TEMP_ASR_DIR, cleanupTempAsrFiles, recentAsrStats } from '../audio';
-import { pushDigestToNotion, pushHistoricalToNotion } from '../notion';
+import { pushDigestToNotion, pushHistoricalToNotion, archiveHistoricalPages } from '../notion';
 import OpenAI from 'openai';
 import path from 'path';
 import fs from 'fs';
@@ -1176,6 +1176,26 @@ router.post('/notion/push', async (req: Request, res: Response) => {
   } catch (err) {
     res.status(500).json({ success: false, error: (err as Error).message });
   }
+});
+
+// 归档所有历史页面（📚 前缀），用于清理重复推送
+// 用法：POST /api/notion/archive-historical
+router.post('/notion/archive-historical', (_req: Request, res: Response) => {
+  const db = getDatabase();
+  const taskLogId = db.createTaskLog('notion_archive_historical');
+  res.json({ success: true, data: { message: '开始归档历史页面（后台处理）', taskLogId } });
+
+  const onProgress = (msg: string) => {
+    try { db.updateTaskLog(taskLogId, { error_details: `[progress] ${msg}` }); } catch {}
+  };
+  archiveHistoricalPages(onProgress).then(result => {
+    db.updateTaskLog(taskLogId, {
+      status: result.ok ? 'completed' : 'failed',
+      error_details: result.ok ? `已归档 ${result.archived} 个历史页` : (result.error || 'unknown'),
+    });
+  }).catch(err => {
+    db.updateTaskLog(taskLogId, { status: 'failed', error_details: (err as Error).message });
+  });
 });
 
 // 批量推送历史剧集到 Notion（按发布日期分组，每天一页）

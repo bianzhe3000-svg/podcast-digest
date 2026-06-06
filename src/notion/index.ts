@@ -205,14 +205,98 @@ export async function pushDigestToNotion(date: string): Promise<{
   }
 }
 
+// 并发锁：防止同一时间多个历史推送任务并发运行（避免重复页面）
+let historicalPushRunning = false;
+
+/** 查询 Notion 数据库中已存在的页面标题集合（用于去重） */
+async function getExistingTitles(notion: Client, dbId: string): Promise<Set<string>> {
+  const titles = new Set<string>();
+  let cursor: string | undefined = undefined;
+  try {
+    do {
+      const resp: any = await (notion as any).databases.query({
+        database_id: dbId,
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      for (const page of resp.results || []) {
+        // 标题属性名是「名称」
+        const titleProp = page.properties?.['名称'];
+        const t = titleProp?.title?.map((x: any) => x.plain_text).join('') || '';
+        if (t) titles.add(t);
+      }
+      cursor = resp.has_more ? resp.next_cursor : undefined;
+      await new Promise(r => setTimeout(r, 200));
+    } while (cursor);
+  } catch (err) {
+    logger.warn('getExistingTitles failed (will skip dedup)', { error: (err as Error).message });
+  }
+  return titles;
+}
+
+/**
+ * 归档（删除到回收站）所有历史页面（标题以 📚 开头）。
+ * 用于清理重复推送的页面，重新干净推送前调用。
+ */
+export async function archiveHistoricalPages(
+  onProgress?: (msg: string) => void
+): Promise<{ ok: boolean; archived: number; error?: string }> {
+  const apiKey = process.env.NOTION_API_KEY;
+  if (!apiKey) return { ok: false, archived: 0, error: 'NOTION_API_KEY not configured' };
+  const dbId = process.env.NOTION_DATABASE_ID || DEFAULT_DB_ID;
+  const notion = new Client({ auth: apiKey });
+
+  try {
+    let archived = 0;
+    let cursor: string | undefined = undefined;
+    let scanned = 0;
+    do {
+      const resp: any = await (notion as any).databases.query({
+        database_id: dbId,
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      for (const page of resp.results || []) {
+        scanned++;
+        const t = page.properties?.['名称']?.title?.map((x: any) => x.plain_text).join('') || '';
+        // 只删历史页（📚 前缀），保留每日页（📰 前缀）
+        if (t.startsWith('📚')) {
+          try {
+            await (notion as any).pages.update({ page_id: page.id, in_trash: true });
+            archived++;
+            if (archived % 20 === 0) onProgress?.(`已归档 ${archived} 个历史页`);
+            await new Promise(r => setTimeout(r, 200));
+          } catch (e) {
+            logger.warn('archive page failed', { id: page.id, error: (e as Error).message });
+          }
+        }
+      }
+      cursor = resp.has_more ? resp.next_cursor : undefined;
+      await new Promise(r => setTimeout(r, 250));
+    } while (cursor);
+
+    onProgress?.(`归档完成：扫描 ${scanned} 页，归档 ${archived} 个历史页`);
+    return { ok: true, archived };
+  } catch (err: any) {
+    const msg = err?.body ? JSON.stringify(err.body) : (err as Error).message;
+    return { ok: false, archived: 0, error: msg };
+  }
+}
+
 // ── 公开：批量推送历史剧集（按发布日期分组，每天一个页面） ──────────────────
 export async function pushHistoricalToNotion(
   sinceDays: number,
   onProgress?: (msg: string) => void
-): Promise<{ ok: boolean; daysPushed: number; episodesPushed: number; pages: string[]; error?: string }> {
+): Promise<{ ok: boolean; daysPushed: number; episodesPushed: number; skipped: number; pages: string[]; error?: string }> {
   const apiKey = process.env.NOTION_API_KEY;
-  if (!apiKey) return { ok: false, daysPushed: 0, episodesPushed: 0, pages: [], error: 'NOTION_API_KEY not configured' };
+  if (!apiKey) return { ok: false, daysPushed: 0, episodesPushed: 0, skipped: 0, pages: [], error: 'NOTION_API_KEY not configured' };
   const dbId = process.env.NOTION_DATABASE_ID || DEFAULT_DB_ID;
+
+  // 并发锁：拒绝第二个并发请求
+  if (historicalPushRunning) {
+    return { ok: false, daysPushed: 0, episodesPushed: 0, skipped: 0, pages: [], error: '已有历史推送任务正在运行，拒绝并发执行' };
+  }
+  historicalPushRunning = true;
 
   try {
     const db = getDatabase();
@@ -232,38 +316,50 @@ export async function pushHistoricalToNotion(
 
     // 日期降序
     const dates = [...byDate.keys()].sort((a, b) => b.localeCompare(a));
-    onProgress?.(`分为 ${dates.length} 个日期，开始逐日推送...`);
 
+    // 去重：拉取已存在页面标题，跳过已推送的日期
     const notion = new Client({ auth: apiKey });
+    onProgress?.(`分为 ${dates.length} 个日期，正在检查已存在页面以去重...`);
+    const existing = await getExistingTitles(notion, dbId);
+    onProgress?.(`已存在 ${existing.size} 个页面，开始逐日推送（跳过重复）...`);
+
     const pages: string[] = [];
     let episodesPushed = 0;
+    let skipped = 0;
 
     for (let i = 0; i < dates.length; i++) {
       const date = dates[i];
       const eps = byDate.get(date)!;
-      // 组内按播客名排序
+      const title = `📚 Podcast Digest ${date} (${eps.length}集)`;
+
+      // 去重：标题已存在则跳过
+      if (existing.has(title)) {
+        skipped++;
+        onProgress?.(`[${i + 1}/${dates.length}] ${date} 已存在，跳过`);
+        continue;
+      }
+
       eps.sort((a, b) => a.podcastName.localeCompare(b.podcastName));
       try {
-        const r = await createDigestPage(notion, dbId, {
-          title: `📚 Podcast Digest ${date} (${eps.length}集)`,
-          episodes: eps,
-        });
+        const r = await createDigestPage(notion, dbId, { title, episodes: eps });
         pages.push(r.pageUrl);
         episodesPushed += eps.length;
+        existing.add(title); // 记录，防止本次运行内重复
         onProgress?.(`[${i + 1}/${dates.length}] ${date} 推送成功（${eps.length} 集）`);
       } catch (err: any) {
         const msg = err?.body ? JSON.stringify(err.body) : (err as Error).message;
         logger.warn('Notion historical day push failed', { date, error: msg });
         onProgress?.(`[${i + 1}/${dates.length}] ${date} 失败：${msg.slice(0, 80)}`);
       }
-      // 日期之间停顿，避免限流
       await new Promise(r => setTimeout(r, 500));
     }
 
-    return { ok: true, daysPushed: pages.length, episodesPushed, pages };
+    return { ok: true, daysPushed: pages.length, episodesPushed, skipped, pages };
   } catch (err: any) {
     const msg = err?.body ? JSON.stringify(err.body) : (err as Error).message;
     logger.error('Notion historical push failed', { error: msg });
-    return { ok: false, daysPushed: 0, episodesPushed: 0, pages: [], error: msg };
+    return { ok: false, daysPushed: 0, episodesPushed: 0, skipped: 0, pages: [], error: msg };
+  } finally {
+    historicalPushRunning = false;
   }
 }
