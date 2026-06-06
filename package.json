@@ -9,6 +9,7 @@
     "dev": "ts-node src/server.ts"
   },
   "dependencies": {
+    "@notionhq/client": "^5.22.0",
     "@types/pdfkit": "^0.17.5",
     "axios": "^1.7.9",
     "better-sqlite3": "^11.7.0",

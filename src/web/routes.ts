@@ -11,6 +11,7 @@ import { exportToPdf } from '../markdown/pdf';
 import { logger } from '../utils/logger';
 import { AUDIO_DIR } from '../audio/dialogue';
 import { TEMP_ASR_DIR, cleanupTempAsrFiles, recentAsrStats } from '../audio';
+import { pushDigestToNotion } from '../notion';
 import OpenAI from 'openai';
 import path from 'path';
 import fs from 'fs';
@@ -1158,6 +1159,23 @@ router.get('/temp-audio/:filename', (req: Request, res: Response) => {
   res.setHeader('Content-Length', stat.size);
   res.setHeader('Accept-Ranges', 'bytes');
   fs.createReadStream(filePath).pipe(res);
+});
+
+// === Notion 推送 ===
+// 手动触发把指定日期 digest 推送到 Notion
+// 用法：POST /api/notion/push?date=2026-05-20
+router.post('/notion/push', async (req: Request, res: Response) => {
+  try {
+    const date = String(req.query.date || req.body?.date || '').replace(/[^0-9\-]/g, '');
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      res.status(400).json({ success: false, error: 'date query required (YYYY-MM-DD)' });
+      return;
+    }
+    const result = await pushDigestToNotion(date);
+    res.json({ success: result.ok, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
 });
 
 // 手动清理超过 60 分钟的 temp-asr 文件（兜底）

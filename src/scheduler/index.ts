@@ -3,6 +3,12 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import { runFullPipeline } from '../pipeline/processor';
 import { sendDailyDigest, generateAndSaveDigest } from '../email';
+import { pushDigestToNotion } from '../notion';
+import dayjs from 'dayjs';
+import utc from 'dayjs/plugin/utc';
+import tz from 'dayjs/plugin/timezone';
+dayjs.extend(utc);
+dayjs.extend(tz);
 
 let scheduledTask: cron.ScheduledTask | null = null;
 let emailTask: cron.ScheduledTask | null = null;
@@ -199,6 +205,22 @@ async function executeEmailDigest(): Promise<{ sent: boolean; episodeCount: numb
     }
 
     logger.info('Email digest task completed', { status: lastEmailStatus });
+
+    // 同步推送到 Notion（独立失败不影响邮件结果）
+    if (result.sent && process.env.NOTION_API_KEY) {
+      try {
+        const today = dayjs().tz('Asia/Shanghai').format('YYYY-MM-DD');
+        const notionResult = await pushDigestToNotion(today);
+        if (notionResult.ok) {
+          logger.info('Notion digest pushed', { date: today, pageUrl: notionResult.pageUrl, blocks: notionResult.blockCount });
+        } else {
+          logger.warn('Notion push failed', { date: today, error: notionResult.error });
+        }
+      } catch (err) {
+        logger.warn('Notion push exception', { error: (err as Error).message });
+      }
+    }
+
     return result;
   } catch (error) {
     lastEmailStatus = `failed: ${(error as Error).message}`;
