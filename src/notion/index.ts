@@ -8,6 +8,8 @@
  *  4. 可选 NOTION_DATABASE_ID（默认值已内置）
  */
 import { Client } from '@notionhq/client';
+import axios from 'axios';
+import { config } from '../config';
 import { logger } from '../utils/logger';
 import { getDatabase } from '../database';
 
@@ -105,6 +107,37 @@ function episodeBlocks(idx: number, ep: DigestEp): any[] {
   }
   blocks.push(divider());
   return blocks;
+}
+
+// ── 为某一天的剧集生成「当日总结」（历史页面用，因历史无现成 overview） ──────
+async function generateDayOverview(episodes: DigestEp[], date: string): Promise<string> {
+  if (!config.dashscope.apiKey || episodes.length === 0) return '';
+  const inputs = episodes.map((ep, i) => {
+    const kps = (ep.keyPoints || []).slice(0, 4).map(k => `  · ${k.title}`).join('\n');
+    return `【${i + 1}】${ep.podcastName}：${ep.title}\n摘要：${(ep.summary || '').slice(0, 300)}\n要点：\n${kps}`;
+  }).join('\n\n---\n\n');
+
+  const prompt = `以下是 ${date} 更新的 ${episodes.length} 个播客剧集内容。请将精华整合成一篇 2000-2500 字的当日总结：\n1. 按话题/领域归类梳理，不要逐集罗列\n2. 突出最有价值的观点、数据和洞见\n3. 语言流畅，适合快速阅读\n4. 中文撰写，直接输出正文，不加额外标题\n\n${inputs}`;
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 120000);
+  try {
+    const resp = await axios.post(
+      'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      {
+        model: process.env.DASHSCOPE_SUMMARY_MODEL || 'qwen-plus',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 4000,
+      },
+      { headers: { Authorization: `Bearer ${config.dashscope.apiKey}`, 'Content-Type': 'application/json' }, timeout: 120000, signal: ac.signal }
+    );
+    return resp.data?.choices?.[0]?.message?.content || '';
+  } catch (e) {
+    logger.warn('generateDayOverview failed', { date, error: (e as Error).message });
+    return '';
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ── 从 DB 取一集的完整结构 ──────────────────────────────────────────────────
@@ -356,11 +389,14 @@ export async function pushHistoricalToNotion(
 
       eps.sort((a, b) => a.podcastName.localeCompare(b.podcastName));
       try {
-        const r = await createDigestPage(notion, dbId, { title, episodes: eps });
+        // 为历史页面生成「当日总结」（页首展示，含目录）
+        onProgress?.(`[${i + 1}/${dates.length}] ${date} 生成当日总结...`);
+        const overview = await generateDayOverview(eps, date);
+        const r = await createDigestPage(notion, dbId, { title, overview, episodes: eps });
         pages.push(r.pageUrl);
         episodesPushed += eps.length;
         existing.add(title); // 记录，防止本次运行内重复
-        onProgress?.(`[${i + 1}/${dates.length}] ${date} 推送成功（${eps.length} 集）`);
+        onProgress?.(`[${i + 1}/${dates.length}] ${date} 推送成功（${eps.length} 集，总结${overview.length}字）`);
       } catch (err: any) {
         const msg = err?.body ? JSON.stringify(err.body) : (err as Error).message;
         logger.warn('Notion historical day push failed', { date, error: msg });
