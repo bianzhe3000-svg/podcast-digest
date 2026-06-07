@@ -4,7 +4,7 @@ import { getDatabase } from '../database';
 import { searchPodcasts, parseOPML, parseFeed, validateFeed } from '../rss';
 import { processEpisode, refreshAndProcessPodcast, runFullPipeline } from '../pipeline/processor';
 import { startScheduler, stopScheduler, getSchedulerStatus, triggerManualRun, triggerEmailDigest } from '../scheduler';
-import { sendDailyDigest, testEmailConnection, generateAndSaveDigest } from '../email';
+import { sendDailyDigest, testEmailConnection, generateAndSaveDigest, regenerateDigestForDate } from '../email';
 import { testTts } from '../audio/dialogue';
 import { listMarkdownFiles, listMarkdownFilesWithMeta, readMarkdown } from '../markdown';
 import { exportToPdf } from '../markdown/pdf';
@@ -1194,6 +1194,41 @@ router.post('/notion/archive-historical', (_req: Request, res: Response) => {
       error_details: result.ok ? `已归档 ${result.archived} 个历史页` : (result.error || 'unknown'),
     });
   }).catch(err => {
+    db.updateTaskLog(taskLogId, { status: 'failed', error_details: (err as Error).message });
+  });
+});
+
+// 补救某天失败的 digest：重新生成总结+音频，然后推送到 Notion
+// 用法：POST /api/digest/regenerate-and-push?date=2026-06-06
+router.post('/digest/regenerate-and-push', (req: Request, res: Response) => {
+  const date = String(req.query.date || req.body?.date || '').replace(/[^0-9\-]/g, '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    res.status(400).json({ success: false, error: 'date 参数必填 (YYYY-MM-DD)' });
+    return;
+  }
+  const db = getDatabase();
+  const taskLogId = db.createTaskLog(`regen_and_push_${date}`);
+  res.json({ success: true, data: { message: `开始重新生成并推送 ${date}（后台）`, taskLogId } });
+
+  const onStage = (s: string) => { try { db.updateTaskLog(taskLogId, { error_details: `[stage] ${s}` }); } catch {} };
+
+  (async () => {
+    const regen = await regenerateDigestForDate(date, onStage);
+    if (!regen.ok) {
+      db.updateTaskLog(taskLogId, { status: 'failed', error_details: `regen 失败: ${regen.error}` });
+      return;
+    }
+    onStage(`pushing_to_notion`);
+    const push = await pushDigestToNotion(date);
+    db.updateTaskLog(taskLogId, {
+      status: push.ok ? 'completed' : 'failed',
+      total_episodes: regen.episodeCount,
+      processed_episodes: regen.episodeCount,
+      error_details: push.ok
+        ? `完成: ${regen.episodeCount}集, 总结${(regen.summary || '').length}字, 音频${regen.audioGenerated ? '✓' : '✗'}`
+        : `推送失败: ${push.error}`,
+    });
+  })().catch(err => {
     db.updateTaskLog(taskLogId, { status: 'failed', error_details: (err as Error).message });
   });
 });

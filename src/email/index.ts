@@ -437,6 +437,70 @@ ${audioUrl ? `  <div style="padding:24px 30px;background:linear-gradient(135deg,
  *
  * 可选 onStage 回调：每进入新阶段调用一次（用于在 task_log 中记录进度）
  */
+/**
+ * 重新生成指定日期的 digest（用已存的 episode_ids，不依赖时间窗口）
+ * 用于补救某天生成失败（summary/audio 为空）的情况
+ */
+export async function regenerateDigestForDate(
+  date: string,
+  onStage?: (stage: string) => void
+): Promise<{ ok: boolean; episodeCount: number; summary?: string; audioFilename?: string | null; audioGenerated?: boolean; error?: string }> {
+  const stage = (s: string) => { logger.info(`[regen ${date}] ${s}`); onStage?.(s); };
+  try {
+    const db = getDatabase();
+    const digest = db.getDailyDigest(date);
+    if (!digest) return { ok: false, episodeCount: 0, error: `无 ${date} 的 digest 记录` };
+    const episodeIds: number[] = JSON.parse(digest.episode_ids || '[]');
+    if (episodeIds.length === 0) return { ok: false, episodeCount: 0, error: `${date} 没有关联剧集` };
+
+    // 按已存 episode_ids 重建 DigestEpisode[]
+    const raw: DigestEpisode[] = [];
+    for (const id of episodeIds) {
+      const ep = db.getEpisodeById(id);
+      if (!ep) continue;
+      const podcast = db.getPodcastById(ep.podcast_id);
+      const analysis = db.getAnalysisResult(id);
+      if (!podcast || !analysis) continue;
+      raw.push({ podcast, episode: ep, analysis, markdownContent: null });
+    }
+    if (raw.length === 0) return { ok: false, episodeCount: 0, error: `${date} 剧集分析数据缺失` };
+
+    const episodes = sortEpisodesByPodcast(raw);
+    const dateStr = dayjs(date).format('YYYY年MM月DD日');
+
+    stage(`summary_generating (${episodes.length} episodes)`);
+    const dailySummary = await generateDailySummary(episodes, dateStr);
+    stage(`summary_done (${dailySummary.length} chars)`);
+
+    const episodesInput = episodes.map((ep, i) => {
+      let keyPoints: { title: string; detail: string }[] = [];
+      try { keyPoints = JSON.parse(ep.analysis.key_points || '[]'); } catch {}
+      const kpText = keyPoints.map(kp => `  · ${kp.title}：${kp.detail || ''}`.slice(0, 120)).join('\n');
+      const summary = (ep.analysis.summary || '').slice(0, 600);
+      const recap = (ep.analysis.knowledge_points || '').slice(0, 300);
+      return `【${i + 1}】${ep.podcast.name}：${ep.episode.title}\n摘要：${summary}\n要点：\n${kpText}${recap ? `\n补充：${recap}` : ''}`;
+    }).join('\n\n---\n\n');
+
+    let audioFilename: string | null = null;
+    let audioGenerated = false;
+    try {
+      stage('audio_generating');
+      audioFilename = await generateDailyDialogue(episodesInput, dateStr, episodes.length, onStage, date);
+      audioGenerated = !!audioFilename;
+      stage(audioGenerated ? 'audio_done' : 'audio_failed');
+    } catch (err) {
+      logger.warn('regen audio failed', { date, error: (err as Error).message });
+      stage(`audio_error: ${(err as Error).message.slice(0, 120)}`);
+    }
+
+    db.saveDailyDigest(date, dailySummary || '', audioFilename, episodeIds);
+    stage('saved');
+    return { ok: true, episodeCount: episodes.length, summary: dailySummary, audioFilename, audioGenerated };
+  } catch (err) {
+    return { ok: false, episodeCount: 0, error: (err as Error).message };
+  }
+}
+
 export async function generateAndSaveDigest(
   sinceHours: number = 24,
   onStage?: (stage: string) => void

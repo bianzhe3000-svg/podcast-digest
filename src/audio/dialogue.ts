@@ -287,7 +287,8 @@ export async function generateDailyDialogue(
   episodesInput: string,
   _dateStr: string,
   episodeCount: number,
-  onStage?: (stage: string) => void
+  onStage?: (stage: string) => void,
+  fileDate?: string  // 可选：指定文件名日期（YYYY-MM-DD），用于补生成历史某天
 ): Promise<string | null> {
   const stage = (s: string) => onStage?.(s);
 
@@ -349,7 +350,7 @@ export async function generateDailyDialogue(
   // 4-4. 用 ffmpeg 重新编码合并（消除块边界跳跃 + 统一比特率）
   stage('audio_encoding');
   fs.mkdirSync(AUDIO_DIR, { recursive: true });
-  const filename = `digest-${dayjs().tz('Asia/Shanghai').format('YYYY-MM-DD')}.mp3`;
+  const filename = `digest-${fileDate || dayjs().tz('Asia/Shanghai').format('YYYY-MM-DD')}.mp3`;
   const filePath = path.join(AUDIO_DIR, filename);
   await concatMp3sWithFfmpeg(buffers, filePath);
 
